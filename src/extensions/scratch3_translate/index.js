@@ -2,7 +2,7 @@ const ArgumentType = require('../../extension-support/argument-type');
 const BlockType = require('../../extension-support/block-type');
 const Cast = require('../../util/cast');
 const log = require('../../util/log');
-const nets = require('nets');
+const {fetchWithTimeout} = require('../../util/fetch-with-timeout');
 const languageNames = require('scratch-translate-extension-languages');
 const formatMessage = require('format-message');
 
@@ -146,7 +146,10 @@ class Scratch3TranslateBlocks {
                 }
             ],
             menus: {
-                languages: this._supportedLanguages
+                languages: {
+                    acceptReporters: true,
+                    items: this._supportedLanguages
+                }
             }
         };
     }
@@ -171,7 +174,15 @@ class Scratch3TranslateBlocks {
     getViewerLanguage () {
         this._viewerLanguageCode = this.getViewerLanguageCode();
         const names = languageNames.menuMap[this._viewerLanguageCode];
-        const langNameObj = names.find(obj => obj.code === this._viewerLanguageCode);
+        let langNameObj = names.find(obj => obj.code === this._viewerLanguageCode);
+
+        // If we don't have a name entry yet, try looking it up via the Google langauge
+        // code instead of Scratch's (e.g. for es-419 we look up es to get espanol)
+        if (!langNameObj && languageNames.scratchToGoogleMap[this._viewerLanguageCode]) {
+            const lookupCode = languageNames.scratchToGoogleMap[this._viewerLanguageCode];
+            langNameObj = names.find(obj => obj.code === lookupCode);
+        }
+
         let langName = this._viewerLanguageCode;
         if (langNameObj) {
             langName = langNameObj.name;
@@ -193,12 +204,13 @@ class Scratch3TranslateBlocks {
             if (acc) {
                 return acc;
             }
-            if (languageKeys.indexOf(lang) > -1) {
+            if (languageKeys.indexOf(lang.toLowerCase()) > -1) {
                 return lang;
             }
             return acc;
         }, '') || 'en';
-        return languageCode;
+
+        return languageCode.toLowerCase();
     }
 
     /**
@@ -210,12 +222,20 @@ class Scratch3TranslateBlocks {
     getLanguageCodeFromArg (arg) {
         const languageArg = Cast.toString(arg).toLowerCase();
         // Check if the arg matches a language code in the menu.
-        if (languageNames.menuMap.hasOwnProperty(languageArg)) {
+        if (Object.prototype.hasOwnProperty.call(languageNames.menuMap, languageArg)) {
             return languageArg;
         }
         // Check for a dropped-in language name, and convert to a language code.
-        if (languageNames.nameMap.hasOwnProperty(languageArg)) {
+        if (Object.prototype.hasOwnProperty.call(languageNames.nameMap, languageArg)) {
             return languageNames.nameMap[languageArg];
+        }
+
+        // There are some languages we launched in the language menu that Scratch did not
+        // end up launching in. In order to keep projects that may have had that menu item
+        // working, check for those language codes and let them through.
+        // Examples: 'ab', 'hi'.
+        if (languageNames.previouslySupported.indexOf(languageArg) !== -1) {
+            return languageArg;
         }
         // Default to English.
         return 'en';
@@ -227,6 +247,10 @@ class Scratch3TranslateBlocks {
      * @return {Promise} - a promise that resolves after the response from the translate server.
      */
     getTranslate (args) {
+        // If the text contains only digits 0-9 and nothing else, return it without
+        // making a request.
+        if (/^\d+$/.test(args.WORDS)) return Promise.resolve(args.WORDS);
+
         // Don't remake the request if we already have the value.
         if (this._lastTextTranslated === args.WORDS &&
             this._lastLangTranslated === args.LANGUAGE) {
@@ -241,28 +265,21 @@ class Scratch3TranslateBlocks {
         urlBase += encodeURIComponent(args.WORDS);
 
         const tempThis = this;
-        const translatePromise = new Promise(resolve => {
-            nets({
-                url: urlBase,
-                timeout: serverTimeoutMs
-            }, (err, res, body) => {
-                if (err) {
-                    log.warn(`error fetching translate result! ${res}`);
-                    resolve('');
-                    return '';
-                }
-                const translated = JSON.parse(body).result;
+        const translatePromise = fetchWithTimeout(urlBase, {}, serverTimeoutMs)
+            .then(response => response.text())
+            .then(responseText => {
+                const translated = JSON.parse(responseText).result;
                 tempThis._translateResult = translated;
                 // Cache what we just translated so we don't keep making the
                 // same call over and over.
                 tempThis._lastTextTranslated = args.WORDS;
                 tempThis._lastLangTranslated = args.LANGUAGE;
-                resolve(translated);
                 return translated;
+            })
+            .catch(err => {
+                log.warn(`error fetching translate result! ${err}`);
+                return '';
             });
-
-        });
-        translatePromise.then(translatedText => translatedText);
         return translatePromise;
     }
 }
