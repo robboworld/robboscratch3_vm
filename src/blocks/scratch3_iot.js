@@ -17,19 +17,23 @@ class Scratch3IoTBlocks{
         this.options = {};
         this.delays = {};
         this.delays_for_publish = {};
-        this.topics_enum = {air:'a', dis:'b', lux:'c',tem:'d', hum:'e',wind:'f',snd:'g',txt:'h'};
+        this.topics_enum = {air:'a', dis:'b', lux:'c',tem:'d', hum:'e',wind:'f',snd:'g',txt:'h',txt2:'i'};
         this.data_sensors = {
             air: -1,
             distance: -1,
             lux: -1,
             temp: -1, 
-            hum: -1
+            hum: -1,
+            wind: -1,
+            snd: -1,
+            txt: -1,
+            txt2: -1
         }
         console.log(this.runtime.toString());
         try{
             console.log(this.runtime.ECA.toString());
         } catch {}
-        // this.runtime.ECA.setWifi("Domru344", "89213021207");
+       
     }
  
 
@@ -102,9 +106,44 @@ class Scratch3IoTBlocks{
         if (this.runtime.IOT.client !== 'undefined'){
             this.runtime.IOT.client.on( "error", (error) => {
 
-
                 console.error(`Connect error: ${error}`);
-            } )
+                this.runtime.IOT.connectionStatus = this.runtime.IOT.client.connected;
+                this.runtime.IOT.connectionLog =    error.toString();
+            } );
+
+            this.runtime.IOT.client.on("reconnect", () => {
+                this.runtime.IOT.connectionLog = "Client is reconnecting!";  
+                this.runtime.IOT.connectionStatus = this.runtime.IOT.client.connected;
+
+                console.error(`Client is reconnecting!`);
+        
+              });  
+        
+              this.runtime.IOT.client.on("close", () => {
+                this.runtime.IOT.connectionLog = "Client is closed!";  
+                this.runtime.IOT.connectionStatus = this.runtime.IOT.client.connected;
+
+                console.error(`Client is closed!`);
+        
+              });  
+        
+              this.runtime.IOT.client.on("offline", () => {
+                this.runtime.IOT.connectionLog = "Client is offline!!";  
+                this.runtime.IOT.connectionStatus = this.runtime.IOT.client.connected;
+
+                console.error(`Client is offline!`);
+        
+              });  
+
+              this.runtime.IOT.client.on("connect", () => {
+                this.runtime.IOT.connectionLog = "Client is connected!";  
+                this.runtime.IOT.connectionStatus = this.runtime.IOT.client.connected;
+
+                console.warn(`Client is connected!`);
+        
+              });  
+
+
         }
         return;
         //return {"baddr": this.baddr, "bport": this.bport};
@@ -122,7 +161,19 @@ class Scratch3IoTBlocks{
 
 
             console.log("mess_to_topic.args" + args + "; <baddr, bport> = <" + topic + ", " + msg + ">");
-            this.runtime.IOT.client.publish(topic, msg);
+
+
+            try {
+
+                this.runtime.IOT.client.publish(topic, msg);
+                
+            } catch (error) {
+                
+                console.error(` iot_mess_to_topic error: ${error}`);
+            }
+
+
+            
         }
         return;
     }
@@ -284,16 +335,18 @@ class Scratch3IoTBlocks{
         if (this.runtime.IOT.client === undefined || this.runtime.IOT.client === null) {
             return this.runtime.IOT.connectionStatus = false;
         }
-        return this.runtime.IOT.connectionStatus = this.runtime.IOT.client.connected;
+        //return this.runtime.IOT.connectionStatus = this.runtime.IOT.client.connected;
+        
+        return this.runtime.IOT.connectionStatus;
     }
 
     iot_connection_log(args) {
         if (this.runtime.IOT.client === undefined || this.runtime.IOT.client === null) {
             return this.runtime.IOT.connectionLog = "Client is undefined!";
         }
-        if (this.runtime.IOT.client.connected) {
-            return this.runtime.IOT.connectionLog = "Client is connected!";
-        }
+        // if (this.runtime.IOT.client.connected) {
+        //     return this.runtime.IOT.connectionLog = "Client is connected!";
+        // }
         return this.runtime.IOT.connectionLog;
     }
 
