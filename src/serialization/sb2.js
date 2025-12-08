@@ -51,7 +51,8 @@ const CORE_EXTENSIONS = [
     "sosonic",
     "pwm",
     "pin",
-    "stolb"
+    "stolb",
+    "iot"
 ];
 
 // Adjust script coordinates to account for
