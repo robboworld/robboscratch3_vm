@@ -29,6 +29,7 @@ const {QuadcopterControlAPI} =  require ('Robboscratch3_DeviceControlAPI');
 const {DeviceControlAPI} =  require ('Robboscratch3_DeviceControlAPI');
 const {OttoControlAPI} =  require ('Robboscratch3_DeviceControlAPI');
 const {ArduinoControlAPI} =  require ('Robboscratch3_DeviceControlAPI');
+const {EspControlAPI} =  require ('Robboscratch3_DeviceControlAPI');
 const StateIOTBlock = require('./iot');
 
 const RESERVED_NAMES = ['_mouse_', '_stage_', '_edge_', '_myself_', '_random_'];
@@ -60,6 +61,7 @@ class VirtualMachine extends EventEmitter {
         this.DCA = new DeviceControlAPI; //modified_by_Yaroslav //not original
         this.OCA = new OttoControlAPI; //modified_by_Yaroslav //not original
         this.ACA = new ArduinoControlAPI; //modified_by_Yaroslav //not original
+        this.ECA = new EspControlAPI; //modified_by_Yaroslav //not original
         this.IOT = new StateIOTBlock();
 
         this.isFullscreenMode = false;
@@ -68,7 +70,7 @@ class VirtualMachine extends EventEmitter {
          * VM runtime, to store blocks, I/O devices, sprites/targets, etc.
          * @type {!Runtime}
          */
-        this.runtime = new Runtime(this.RCA, this.LCA,this.QCA,this.OCA,this.ACA,this.IOT);
+        this.runtime = new Runtime(this.RCA, this.LCA,this.QCA,this.OCA,this.ACA,this.ECA,this.IOT);
         centralDispatch.setService('runtime', this.runtime).catch(e => {
             log.error(`Failed to register runtime service: ${JSON.stringify(e)}`);
         });
@@ -205,6 +207,12 @@ class VirtualMachine extends EventEmitter {
 
 
        return this.ACA;
+    }
+
+    getECA(){
+
+
+       return this.ECA;
     }
 
 

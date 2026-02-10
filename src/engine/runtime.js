@@ -161,7 +161,7 @@ let rendererDrawProfilerId = -1;
  * @constructor
  */
 class Runtime extends EventEmitter {
-  constructor (RCA,LCA,QCA,OCA,ACA,IOT) { //modified_by_Yaroslav
+  constructor (RCA,LCA,QCA,OCA,ACA,ECA,IOT) { //modified_by_Yaroslav
       super();
 
       this.RCA = RCA;
@@ -173,6 +173,8 @@ class Runtime extends EventEmitter {
       this.OCA = OCA;
 
       this.ACA = ACA;
+
+      this.ECA = ECA;
 
       this.IOT = IOT;
 
