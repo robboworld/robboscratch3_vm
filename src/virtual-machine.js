@@ -54,7 +54,6 @@ class VirtualMachine extends EventEmitter {
     constructor () {
         super();
 
-        this.worker = new Worker('SomeDurtyWork.js');
         this.RCA = new RobotControlAPI(); //modified_by_Yaroslav //not original
         this.LCA = new LaboratoryControlAPI(); //modified_by_Yaroslav //not original
         this.QCA = new QuadcopterControlAPI(); //modified_by_Yaroslav //not original
@@ -464,27 +463,32 @@ class VirtualMachine extends EventEmitter {
         });
     }
 
+    /**
+     * Auto-save: serialize project to sb3 blob in main thread (same as saveProjectSb3, with sb3.serialize).
+     * @returns {Promise<Blob>} Resolves with the project zip blob, or rejects if project is empty/invalid.
+     */
     saveProjectSb3_auto () {
         const soundDescs = serializeSounds(this.runtime);
         const costumeDescs = serializeCostumes(this.runtime);
+        const serializedProject = sb3.serialize(this.runtime);
 
-        const serializedProject = sb3.serialize(this.runtime);//added_by_Yaroslav
+        if (typeof serializedProject.targets === 'undefined') {
+            return Promise.reject(new Error('Project targets undefined'));
+        }
+        if (serializedProject.targets.length === 0) {
+            return Promise.reject(new Error('Project has no targets'));
+        }
 
-        if (typeof(serializedProject.targets) === 'undefined') return;
+        const projectJson = StringUtil.stringify(serializedProject);
+        const zip = new JSZip();
+        zip.file('project.json', projectJson);
+        this._addFileDescsToZip(soundDescs.concat(costumeDescs), zip);
 
-        if (serializedProject.targets.length == 0) return; //bad state; causes crashes
-
-        const projectJson  =  StringUtil.stringify(serializedProject);//added_by_Yaroslav
-
-       // const projectJson = this.toJSON(); //original
-
-
-        var infa = {};
-        infa.projectJson=projectJson;
-        infa.costumeDescs=costumeDescs;
-        infa.soundDescs=soundDescs;
-        this.worker.postMessage(infa); // Start worker without a message.
-
+        return zip.generateAsync({
+            type: 'blob',
+            compression: 'DEFLATE',
+            compressionOptions: { level: 6 }
+        });
     }
 
     /*
