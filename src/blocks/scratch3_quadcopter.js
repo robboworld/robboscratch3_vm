@@ -164,8 +164,15 @@ this.CopterLANDING =  setInterval(() =>{this.runtime.QCA.move_to_coord(this.x,th
     }
     /*BAD*/
     copter_stop(){
-this.runtime.QCA.copter_land();
-clearInterval(this.CopterLANDING);
+        if (this.SendCordInterval) {
+            clearInterval(this.SendCordInterval);
+            this.SendCordInterval = null;
+        }
+        if (this.CopterLANDING) {
+            clearInterval(this.CopterLANDING);
+            this.CopterLANDING = null;
+        }
+        this.runtime.QCA.copter_land();
     }
 
     /*BAD*/
