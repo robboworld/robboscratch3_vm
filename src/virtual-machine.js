@@ -29,6 +29,7 @@ const {QuadcopterControlAPI} =  require ('Robboscratch3_DeviceControlAPI');
 const {DeviceControlAPI} =  require ('Robboscratch3_DeviceControlAPI');
 const {OttoControlAPI} =  require ('Robboscratch3_DeviceControlAPI');
 const {ArduinoControlAPI} =  require ('Robboscratch3_DeviceControlAPI');
+const {EspControlAPI} =  require ('Robboscratch3_DeviceControlAPI');
 const StateIOTBlock = require('./iot');
 
 const RESERVED_NAMES = ['_mouse_', '_stage_', '_edge_', '_myself_', '_random_'];
@@ -53,13 +54,13 @@ class VirtualMachine extends EventEmitter {
     constructor () {
         super();
 
-        this.worker = new Worker('SomeDurtyWork.js');
         this.RCA = new RobotControlAPI(); //modified_by_Yaroslav //not original
         this.LCA = new LaboratoryControlAPI(); //modified_by_Yaroslav //not original
         this.QCA = new QuadcopterControlAPI(); //modified_by_Yaroslav //not original
         this.DCA = new DeviceControlAPI; //modified_by_Yaroslav //not original
         this.OCA = new OttoControlAPI; //modified_by_Yaroslav //not original
         this.ACA = new ArduinoControlAPI; //modified_by_Yaroslav //not original
+        this.ECA = new EspControlAPI; //modified_by_Yaroslav //not original
         this.IOT = new StateIOTBlock();
 
         this.isFullscreenMode = false;
@@ -68,7 +69,7 @@ class VirtualMachine extends EventEmitter {
          * VM runtime, to store blocks, I/O devices, sprites/targets, etc.
          * @type {!Runtime}
          */
-        this.runtime = new Runtime(this.RCA, this.LCA,this.QCA,this.OCA,this.ACA,this.IOT);
+        this.runtime = new Runtime(this.RCA, this.LCA,this.QCA,this.OCA,this.ACA,this.ECA,this.IOT);
         centralDispatch.setService('runtime', this.runtime).catch(e => {
             log.error(`Failed to register runtime service: ${JSON.stringify(e)}`);
         });
@@ -205,6 +206,12 @@ class VirtualMachine extends EventEmitter {
 
 
        return this.ACA;
+    }
+
+    getECA(){
+
+
+       return this.ECA;
     }
 
 
@@ -456,27 +463,32 @@ class VirtualMachine extends EventEmitter {
         });
     }
 
+    /**
+     * Auto-save: serialize project to sb3 blob in main thread (same as saveProjectSb3, with sb3.serialize).
+     * @returns {Promise<Blob>} Resolves with the project zip blob, or rejects if project is empty/invalid.
+     */
     saveProjectSb3_auto () {
         const soundDescs = serializeSounds(this.runtime);
         const costumeDescs = serializeCostumes(this.runtime);
+        const serializedProject = sb3.serialize(this.runtime);
 
-        const serializedProject = sb3.serialize(this.runtime);//added_by_Yaroslav
+        if (typeof serializedProject.targets === 'undefined') {
+            return Promise.reject(new Error('Project targets undefined'));
+        }
+        if (serializedProject.targets.length === 0) {
+            return Promise.reject(new Error('Project has no targets'));
+        }
 
-        if (typeof(serializedProject.targets) === 'undefined') return;
+        const projectJson = StringUtil.stringify(serializedProject);
+        const zip = new JSZip();
+        zip.file('project.json', projectJson);
+        this._addFileDescsToZip(soundDescs.concat(costumeDescs), zip);
 
-        if (serializedProject.targets.length == 0) return; //bad state; causes crashes
-
-        const projectJson  =  StringUtil.stringify(serializedProject);//added_by_Yaroslav
-
-       // const projectJson = this.toJSON(); //original
-
-
-        var infa = {};
-        infa.projectJson=projectJson;
-        infa.costumeDescs=costumeDescs;
-        infa.soundDescs=soundDescs;
-        this.worker.postMessage(infa); // Start worker without a message.
-
+        return zip.generateAsync({
+            type: 'blob',
+            compression: 'DEFLATE',
+            compressionOptions: { level: 6 }
+        });
     }
 
     /*
