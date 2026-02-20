@@ -148,8 +148,6 @@ class Scratch3LaboratoryBlocks {
           
         } catch (error) {
 
-          console.error("Can not convert args.LED_NUMS to String type");
-          
         }
 
         switch (args.LED_NUMS) {
