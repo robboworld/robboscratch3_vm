@@ -71,6 +71,7 @@ class Scratch3RobotBlocks {
         this.runtime.right_motor_inverted = false; 
 
         this.runtime.sim_ac=false;
+        this.runtime.sim_clamp_to_stage = (this.runtime.sim_clamp_to_stage !== false);
         this.runtime.going=false;
         this.kW=0.01; // шаг движения робота
         this.fps = 6; // Скорость обработки кадров инверсивно меняется 1000/5 = 200   = 72 клетки  =
@@ -155,6 +156,7 @@ class Scratch3RobotBlocks {
 
   // Границы сцены: x -240..240, y -180..180. Размер костюма робота (RobboPlatform) 220x194, центр 110,97.
   clampSimToStage (xc, yc, simTarget) {
+    if (!this.runtime.sim_clamp_to_stage) return { x: xc, y: yc };
     const STAGE_LEFT = -240;
     const STAGE_RIGHT = 240;
     const STAGE_BOTTOM = -180;
