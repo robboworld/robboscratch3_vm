@@ -91,25 +91,25 @@ class Scratch3RobotBlocks {
     }
     newcat_set_ana(args,util)
     {
-    this.runtime.ACA.set_anal(Number(args.PWM_PINS), this.check_0_and_255(Number(args.NUM)));
+    this.runtime.ACA.setAnalogPin(Number(args.PWM_PINS), this.check_0_and_255(Number(args.NUM)));
     }
     newcat_set_dig(args,util)
     {
-    this.runtime.ACA.set_dick(Number(args.PIN),Number(args.HIGH_LOW));
+    this.runtime.ACA.setDigitalPin(Number(args.PIN),Number(args.HIGH_LOW));
     }
     newcat_go_dig(args,util)
     {
-    this.runtime.ACA.get_dick(Number(args.PIN));
+    this.runtime.ACA.getDigitalPin(Number(args.PIN));
     }
     newcat_go_anal(args,util)
     {
-    this.runtime.ACA.get_anal(Number(args.PIN_ANAL));
+    this.runtime.ACA.getAnalogPin(Number(args.PIN_ANAL));
     }
-    newcat_read_ana(args,util)// TODO MB SHIT WITH THIS FILTER
+    newcat_read_ana(args,util)// TODO: improve this filter behavior
     {
         return(this.runtime.ACA.get_pin(args.PIN));
     }
-    newcat_read_dig(args,util)// TODO MB SHIT WITH THIS FILTER
+    newcat_read_dig(args,util)// TODO: improve this filter behavior
     {
         return(this.runtime.ACA.get_pin(args.PIN));
     }
