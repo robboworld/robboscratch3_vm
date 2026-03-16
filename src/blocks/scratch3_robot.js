@@ -97,6 +97,45 @@ class Scratch3RobotBlocks {
         this.ddl = 0 ;
         this.last_util = {};
         this.start_deg=0;
+        this.runtime.on('PROJECT_STOP_ALL', this._onProjectStopAll.bind(this));
+    }
+
+    /**
+     * Stop robot motors and clear timers when project is stopped (Stop button).
+     */
+    _onProjectStopAll () {
+        if (this.robot_motors_on_for_seconds_timeout_stop != null) {
+            clearTimeout(this.robot_motors_on_for_seconds_timeout_stop);
+            this.robot_motors_on_for_seconds_timeout_stop = null;
+        }
+        if (this.robot_motors_on_for_seconds_end_timeout != null) {
+            clearTimeout(this.robot_motors_on_for_seconds_end_timeout);
+            this.robot_motors_on_for_seconds_end_timeout = null;
+        }
+        if (this.motors_on_interval != null) {
+            clearInterval(this.motors_on_interval);
+            this.motors_on_interval = null;
+        }
+        if (this.motors_off_interval != null) {
+            clearInterval(this.motors_off_interval);
+            this.motors_off_interval = null;
+        }
+        if (this.sim_int != null) {
+            clearInterval(this.sim_int);
+            this.sim_int = null;
+        }
+        if (this.a_command_unblock_interval != null) {
+            clearInterval(this.a_command_unblock_interval);
+            this.a_command_unblock_interval = null;
+        }
+        this.runtime.going = false;
+        this.need_to_stop = true;
+        this.is_motors_on_active = false;
+        if (this.runtime.RCA && !this.runtime.sim_ac) {
+            this.runtime.RCA.setRobotPower(0, 0, 0);
+            this.runtime.RCA.unblockPowerCommand();
+            this.runtime.RCA.unblock_A_CommandQueue();
+        }
     }
 
     /**
