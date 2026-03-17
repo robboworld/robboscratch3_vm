@@ -187,12 +187,8 @@ class Runtime extends EventEmitter {
       this.allOtherStuffBeginTime_2 = Date.now();
       this.allOtherStuffEndTime_2 = Date.now();
 
-      this.isFullscreen = false;
-      this.fullscreenInterval = 40;//set this as interval for _step() func in fullscreen mode
-      this.normalInterval = 4;//set this as interval for _step() func in normal mode  //not in use
       this.averageStepDeltaTime = 0;
-      this.avTimeInterval = null;  
-      this.maxAverageStepDeltaTime = 0;
+      this.avTimeInterval = null;
       this.step_time_delta = 0;
       this.settingsSaved = false;
 
@@ -2309,62 +2305,6 @@ class Runtime extends EventEmitter {
         this.emit(Runtime.BLOCKS_NEED_UPDATE);
     }
 
-    setFullscreenInterval(interval){
-
-
-       this.fullscreenInterval = Math.round(Number(interval));
-
-       this.maxAverageStepDeltaTime = this.fullscreenInterval;
-
-       if (typeof(this.fullscreenInterval) !== 'number') return;
-
-       console.warn(`setFullscreenInterval interval: ${this.fullscreenInterval}`);
-
-        if (this.isFullscreen){
-
-            clearInterval(this._steppingInterval);
-
-            this._steppingInterval = setInterval(() => {
-
-                        this._step();
-
-                    },  this.fullscreenInterval);
-
-        }
-    }
-
-    getFullscreenInterval(){
-
-        return  this.fullscreenInterval;
-    }
-
-    setNormalInterval(interval){
-
-     this.normalInterval = Math.round(Number(interval));
-
-      if (typeof(this.normalInterval) !== 'number') return;
-       
-       console.warn(`setNormalInterval interval: ${this.normalInterval}`);
-
-        if (!this.isFullscreen){
-
-            clearInterval(this._steppingInterval);
-
-            this._steppingInterval = setInterval(() => {
-
-                        this._step();
-
-                    }, this.normalInterval);
-
-        }
-
-    }
-
-    getNormalInterval(){
-
-        return  this.normalInterval;
-    }
-
     clearAvTimeInterval(){
 
         clearInterval(this.avTimeInterval);
@@ -2373,65 +2313,6 @@ class Runtime extends EventEmitter {
     setSettingsSaved(){
 
         this.settingsSaved = true;
-    }
-
-    triggerCurrentStepTime(isFullscreen){
-
-        this.isFullscreen = isFullscreen;
-
-        if (isFullscreen){
-
-            // let interval = 9;
-
-            this.fullscreenInterval = this.maxAverageStepDeltaTime; //Math.round(this.averageStepDeltaTime);
-
-            console.warn(`triggerCurrentStepTime fullscreenInterval: ${this.fullscreenInterval}`);
-
-
-            let interval = this.fullscreenInterval;
-
-            this.currentStepTime = interval;  
-
-        
-            
-        
-            clearInterval(this._steppingInterval);
-
-            this._steppingInterval = setInterval(() => {
-                        this._step();
-                    }, interval);
-
-
-
-        }else{
-
-           //  let interval = Runtime.THREAD_STEP_INTERVAL_COMPATIBILITY;
-
-           let interval =  this.normalInterval;
-
-             this.currentStepTime = interval;
-        
-            clearInterval(this._steppingInterval);
-
-            this._steppingInterval = setInterval(() => {
-                        this._step();
-                    }, interval);
-
-
-
-
-        }    
-
-
-      
-
-    }
-
-    setMaxAverageStepDeltaTime(time){
-
-        if (this.settingsSaved) return;
-
-        this.maxAverageStepDeltaTime = time;
     }
 
     /**
@@ -2450,50 +2331,6 @@ class Runtime extends EventEmitter {
             this._step();
         }, interval);
         this.emit(Runtime.RUNTIME_STARTED);
-
-        /////////////////////av_time
-     
-      const performance = typeof window === 'object' && window.performance;
-
-        let time_1 = performance.now();
-        let time_2 = performance.now();
-        let counter = 0;
-        let time_delta = 0;
-        let time_delta_sum = 0;
-
-
-
-
-       this.avTimeInterval = setInterval(() => {
-
-          time_2 = performance.now();
-          time_delta = time_2 - time_1;
-          time_1 = performance.now();
-
-          time_delta_sum+=time_delta;
-          counter++;
-
-          if (counter>=300){
-              this.averageStepDeltaTime = Math.round(time_delta_sum / counter);
-             
-              if (this.averageStepDeltaTime > this.maxAverageStepDeltaTime){
-
-                     this.maxAverageStepDeltaTime = this.averageStepDeltaTime;
-              }
-
-              counter = 0;
-
-              time_delta_sum = 0;
-
-              //this.setFullscreenInterval(this.averageStepDeltaTime);
-
-          }
-
-        },0);
-
-
-        ///////////////////////////////////end of av_time
-
     }
 
     /**

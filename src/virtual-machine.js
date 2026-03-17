@@ -232,13 +232,6 @@ class VirtualMachine extends EventEmitter {
         this.isFullscreenMode = !this.isFullscreenMode;
     }
 
-    triggerCurrentStepTime(isFullscreen){
-
-        console.warn(`triggerCurrentStepTime isFullscreen: ${isFullscreen}`);
-
-        this.runtime.triggerCurrentStepTime(isFullscreen);
-    }
-
     /**
      * Start running the VM - do this before anything else.
      */
