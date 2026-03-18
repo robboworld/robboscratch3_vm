@@ -71,7 +71,6 @@ class Scratch3RobotBlocks {
         this.runtime.right_motor_inverted = false; 
 
         this.runtime.sim_ac=false;
-        this.runtime.sim_clamp_to_stage = (this.runtime.sim_clamp_to_stage !== false);
         this.runtime.going=false;
         this.kW=0.01; // шаг движения робота
         this.fps = 6; // Скорость обработки кадров инверсивно меняется 1000/5 = 200   = 72 клетки  =
@@ -193,23 +192,6 @@ class Scratch3RobotBlocks {
     return robot || util.target;
   }
 
-  // Границы сцены: x -240..240, y -180..180. Размер костюма робота (RobboPlatform) 220x194, центр 110,97.
-  clampSimToStage (xc, yc, simTarget) {
-    if (!this.runtime.sim_clamp_to_stage) return { x: xc, y: yc };
-    const STAGE_LEFT = -240;
-    const STAGE_RIGHT = 240;
-    const STAGE_BOTTOM = -180;
-    const STAGE_TOP = 180;
-    const COSTUME_HALF_W = 110;
-    const COSTUME_HALF_H = 97;
-    const scale = (simTarget && typeof simTarget.size === 'number') ? simTarget.size / 100 : 0.5;
-    const halfW = COSTUME_HALF_W * scale;
-    const halfH = COSTUME_HALF_H * scale;
-    const x = Math.max(STAGE_LEFT + halfW, Math.min(STAGE_RIGHT - halfW, xc));
-    const y = Math.max(STAGE_BOTTOM + halfH, Math.min(STAGE_TOP - halfH, yc));
-    return { x, y };
-  }
-
   robot_motors_on_for_seconds (args, util) {
 
 
@@ -259,9 +241,6 @@ class Scratch3RobotBlocks {
               this.runtime.going=true;
               this.xc=simTarget.x;
               this.yc=simTarget.y;
-              const startClamped = this.clampSimToStage(this.xc, this.yc, simTarget);
-              this.xc = startClamped.x;
-              this.yc = startClamped.y;
               simTarget.setXY(this.xc, this.yc);
               this.sim_int = setInterval(() => {
              const radians = MathUtil.degToRad(90 - simTarget.direction);
@@ -272,16 +251,10 @@ class Scratch3RobotBlocks {
              const dy = dist * Math.sin(radians);
              this.yc+=dy;
              this.xc+=dx;
-             const clamped = this.clampSimToStage(this.xc, this.yc, simTarget);
-             this.xc = clamped.x;
-             this.yc = clamped.y;
              simTarget.setXY(this.xc, this.yc);
              if(simTarget.isTouchingColor(this.wall_color)){
                this.yc-=dy;
                this.xc-=dx;
-               const back = this.clampSimToStage(this.xc, this.yc, simTarget);
-               this.xc = back.x;
-               this.yc = back.y;
                simTarget.setXY(this.xc, this.yc);
              }
              simTarget.setDirection(simTarget.direction + MathUtil.radToDeg(Math.atan((this.sim_pl-this.sim_pr)/this.rad)));
@@ -316,9 +289,6 @@ class Scratch3RobotBlocks {
       this.runtime.going=true;
       this.xc=simTarget.x;
       this.yc=simTarget.y;
-      const startClamped = this.clampSimToStage(this.xc, this.yc, simTarget);
-      this.xc = startClamped.x;
-      this.yc = startClamped.y;
       simTarget.setXY(this.xc, this.yc);
       const radians = MathUtil.degToRad(90 - simTarget.direction);
       let dist = (this.sim_pl+this.sim_pr)/2*this.kW;
@@ -326,16 +296,10 @@ class Scratch3RobotBlocks {
       const dy = dist * Math.sin(radians);
       this.yc+=dy;
       this.xc+=dx;
-      const clamped = this.clampSimToStage(this.xc, this.yc, simTarget);
-      this.xc = clamped.x;
-      this.yc = clamped.y;
       simTarget.setXY(this.xc, this.yc);
       if(simTarget.isTouchingColor(this.wall_color)){
         this.yc-=dy;
         this.xc-=dx;
-        const back = this.clampSimToStage(this.xc, this.yc, simTarget);
-        this.xc = back.x;
-        this.yc = back.y;
         simTarget.setXY(this.xc, this.yc);
       }
       simTarget.setDirection(simTarget.direction + MathUtil.radToDeg(Math.atan((this.sim_pl-this.sim_pr)/this.rad)));
@@ -348,16 +312,10 @@ class Scratch3RobotBlocks {
         const dy = dist * Math.sin(radians);
         this.yc+=dy;
         this.xc+=dx;
-        const clamped = this.clampSimToStage(this.xc, this.yc, simTarget);
-        this.xc = clamped.x;
-        this.yc = clamped.y;
         simTarget.setXY(this.xc, this.yc);
         if(simTarget.isTouchingColor(this.wall_color)){
           this.yc-=dy;
           this.xc-=dx;
-          const back = this.clampSimToStage(this.xc, this.yc, simTarget);
-          this.xc = back.x;
-          this.yc = back.y;
           simTarget.setXY(this.xc, this.yc);
         }
         simTarget.setDirection(simTarget.direction + MathUtil.radToDeg(Math.atan((this.sim_pl-this.sim_pr)/this.rad)));
@@ -1026,9 +984,6 @@ return 100;
             this.runtime.going=true;
             this.xc=simTarget.x;
             this.yc=simTarget.y;
-            const startClamped = this.clampSimToStage(this.xc, this.yc, simTarget);
-            this.xc = startClamped.x;
-            this.yc = startClamped.y;
             simTarget.setXY(this.xc, this.yc);
             this.distl=0;
             this.distr=0;
@@ -1043,16 +998,10 @@ return 100;
              const dy = dist * Math.sin(radians);
              this.yc+=dy;
              this.xc+=dx;
-             const clamped = this.clampSimToStage(this.xc, this.yc, simTarget);
-             this.xc = clamped.x;
-             this.yc = clamped.y;
              simTarget.setXY(this.xc, this.yc);
              if(simTarget.isTouchingColor(this.wall_color)){
                this.yc-=dy;
                this.xc-=dx;
-               const back = this.clampSimToStage(this.xc, this.yc, simTarget);
-               this.xc = back.x;
-               this.yc = back.y;
                simTarget.setXY(this.xc, this.yc);
              }
              simTarget.setDirection(simTarget.direction + MathUtil.radToDeg(Math.atan((this.sim_pl-this.sim_pr)/this.rad)));

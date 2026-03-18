@@ -82,7 +82,6 @@ class VirtualMachine extends EventEmitter {
         this.editingTarget = null;
         this.runtime.sens_list = ["-1","-1","-1","-1","-1"];
         this.runtime.sim_ac =false;
-        this.runtime.sim_clamp_to_stage = true;
         this.runtime.are_motors_inverted = false; 
         this.runtime.left_motor_inverted = false; 
         this.runtime.right_motor_inverted = false; 
