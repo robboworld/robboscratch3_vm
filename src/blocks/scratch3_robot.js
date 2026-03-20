@@ -557,14 +557,23 @@ return 100;
   robot_set_sens(util,a){
       var radians=0,dx=0,dy=0;
       const delta = 10;
+
       var ang = 0;
       if(a==1)ang=315;else if(a==2)ang=225;else if (a==3)ang=135;else if(a==4)ang=45;
-      switch(this.runtime.sens_list[a])//"nosensor","line","led","light","touch","proximity","ultrasonic","color"
+      // In simulation the sensor types are selected in GUI and applied to RCA via `setRobotSensor`.
+      // The sim sensor model used to read from `runtime.sens_list`, but `runtime.sens_list` is never updated.
+      // So we read the selected type from `runtime.RCA.sensors_array[a]` instead.
+      const simSensorType =
+        (this.runtime && this.runtime.RCA && this.runtime.RCA.sensors_array && this.runtime.RCA.sensors_array[a] != null)
+          ? this.runtime.RCA.sensors_array[a]
+          : this.runtime.sens_list[a];
+
+      switch(simSensorType) // 0..7 mapping: nosensor/line/led/light/touch/proximity/ultrasonic/color
       {
-      case "nosensor":
+      case 0: // nosensor
           return -1;
       break;
-      case "line":
+      case 1: // line
           var p=[];
           radians = MathUtil.degToRad(90 - util.target.direction+ang);
           dx = delta * Math.cos(radians);
@@ -578,10 +587,10 @@ return 100;
           //    console.warn("GET2"+sensor_data);
             return sensor_data;
             break;
-            case "led":
+            case 2: // led
             return -1;
             break;
-          case "color":
+          case 7: // color
           var p=[];
           radians = MathUtil.degToRad(90 - util.target.direction+ang);
           dx = delta * Math.cos(radians);
@@ -593,16 +602,16 @@ return 100;
           l = Renderer.getColor(p,d[0],c);
           return l;
           break;
-          case "touch":
+          case 4: // touch
           return this.robot_touch(util,a,ang,delta);
           break;
-          case "proximity":
+          case 5: // proximity
           return Number(100-this.robot_get_dist(util,a,ang,delta));
           break;
-          case "ultrasonic":
+          case 6: // ultrasonic
           return this.robot_get_dist(util,a,ang,delta);
           break;
-          case "light":
+          case 3: // light
           var p=[];p[0]=util.target.x; p[1]=util.target.y; p[2]=0;
           var d = []; d[0]=this.robot_first_draw(util);
           var c = [];c[0]=1;c[1]=1;c[2]=1;c[3]=1;
@@ -613,7 +622,7 @@ return 100;
           break;
           default:
           console.log("WTF");
-          break;
+          return -1;
         }
   }
 
