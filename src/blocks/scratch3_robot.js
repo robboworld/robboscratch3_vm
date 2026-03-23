@@ -243,7 +243,7 @@ class Scratch3RobotBlocks {
               this.yc=simTarget.y;
               simTarget.setXY(this.xc, this.yc);
               this.sim_int = setInterval(() => {
-             const radians = MathUtil.degToRad(90 - simTarget.direction + 90);
+             const radians = MathUtil.degToRad(90 - simTarget.direction);
              let dist = (this.sim_pl+this.sim_pr)/2*this.kW;
              this.sim_dist_l+=Math.abs(this.sim_pl*this.kW);
              this.sim_dist_r+=Math.abs(this.sim_pr*this.kW);
@@ -290,7 +290,7 @@ class Scratch3RobotBlocks {
       this.xc=simTarget.x;
       this.yc=simTarget.y;
       simTarget.setXY(this.xc, this.yc);
-      const radians = MathUtil.degToRad(90 - simTarget.direction + 90);
+      const radians = MathUtil.degToRad(90 - simTarget.direction);
       let dist = (this.sim_pl+this.sim_pr)/2*this.kW;
       const dx = dist * Math.cos(radians);
       const dy = dist * Math.sin(radians);
@@ -304,7 +304,7 @@ class Scratch3RobotBlocks {
       }
       simTarget.setDirection(simTarget.direction + MathUtil.radToDeg(Math.atan((this.sim_pl-this.sim_pr)/this.rad)));
       this.sim_int = setInterval(() => {
-        const radians = MathUtil.degToRad(90 - simTarget.direction + 90);
+        const radians = MathUtil.degToRad(90 - simTarget.direction);
         let dist = (this.sim_pl+this.sim_pr)/2*this.kW;
         this.sim_dist_l+=Math.abs(this.sim_pl*this.kW);
         this.sim_dist_r+=Math.abs(this.sim_pr*this.kW);
@@ -997,7 +997,7 @@ return 100;
             this.distl=0;
             this.distr=0;
             this.sim_int = setInterval(() => {
-             const radians = MathUtil.degToRad(90 - simTarget.direction + 90);
+             const radians = MathUtil.degToRad(90 - simTarget.direction);
              let dist = (this.sim_pl+this.sim_pr)/2*this.kW;
              this.sim_dist_l+=Math.abs(this.sim_pl*this.kW);
              this.sim_dist_r+=Math.abs(this.sim_pr*this.kW);
@@ -1100,7 +1100,7 @@ return 100;
           this.xc=util.target.x;
           this.yc=util.target.y;
           this.sim_int = setInterval(() => {
-          const radians = MathUtil.degToRad(90 - util.target.direction + 90);
+          const radians = MathUtil.degToRad(90 - util.target.direction);
           let dist = (simpl+simpr)/2*this.kW;
           this.sim_dist_l+=Math.abs(simpl*this.kW);
           this.sim_dist_r+=Math.abs(simpr*this.kW);
@@ -1216,7 +1216,7 @@ return 100;
                   this.xc=util.target.x;
                   this.yc=util.target.y;
                 this.sim_int = setInterval(() => {
-                 const radians = MathUtil.degToRad(90 - util.target.direction + 90);
+                 const radians = MathUtil.degToRad(90 - util.target.direction);
                  let dist = (simpl+simpr)/2*this.kW;
                  this.sim_dist_l+=Math.abs(simpl*this.kW);
                  this.sim_dist_r+=Math.abs(simpr*this.kW);
