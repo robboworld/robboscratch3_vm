@@ -79,7 +79,7 @@ class Scratch3RobotBlocks {
         this.yc=0;
         this.sim_dist_l=0;
         this.sim_dist_r=0;
-        this.wall_color=[255,255,255];
+        this.wall_color=[0,0,0];
         this.sim_pl = 63;
         this.sim_pr = 63;
         this.sim_int = null;
@@ -486,13 +486,24 @@ class Scratch3RobotBlocks {
     }
 
 robot_first_draw(util){
-  if(typeof(util.target.renderer._allDrawables)!=="undefined")
-  for (let key in util.target.renderer._allDrawables) {
-        if(typeof(util.target.renderer._allDrawables[key])!=="undefined" && util.target.renderer._allDrawables[key]!= null ){
-    //      console.warn(util.target.renderer._allDrawables[key]);
-        return util.target.renderer._allDrawables[key];}
-        }
-    return "jopa";
+  const renderer = util && util.target ? util.target.renderer : null;
+  if (!renderer || typeof renderer._allDrawables === "undefined") return "no_drawable";
+
+  const stageTarget = this.runtime && typeof this.runtime.getTargetForStage === "function" ?
+    this.runtime.getTargetForStage() : null;
+  if (stageTarget && typeof stageTarget.drawableID !== "undefined" && stageTarget.drawableID !== null) {
+    const stageDrawable = renderer._allDrawables[stageTarget.drawableID];
+    if (typeof stageDrawable !== "undefined" && stageDrawable != null) {
+      return stageDrawable;
+    }
+  }
+
+  for (let key in renderer._allDrawables) {
+    if (typeof renderer._allDrawables[key] !== "undefined" && renderer._allDrawables[key] != null) {
+      return renderer._allDrawables[key];
+    }
+  }
+  return "no_drawable";
 }
 
   robot_set_direction_to(args, util){
