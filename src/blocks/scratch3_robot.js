@@ -183,7 +183,20 @@ class Scratch3RobotBlocks {
 
 //console.warn(this.last_util.target.renderer._allDrawables);
 //console.warn(this.last_util.target.renderer);
-    return(this.robot_set_sens(this.last_util,index));
+    let effectiveUtil = this.last_util;
+    const hasValidLastUtil = !!(effectiveUtil && effectiveUtil.target && typeof effectiveUtil.target.direction !== "undefined");
+    if (!hasValidLastUtil) {
+      const robotTarget = this.runtime && Array.isArray(this.runtime.targets)
+        ? this.runtime.targets.find(t => !t.isStage && t.sprite && t.sprite.name === 'Robbo Robot')
+        : null;
+      if (robotTarget) {
+        effectiveUtil = {target: robotTarget};
+      }
+    }
+    if (!(effectiveUtil && effectiveUtil.target && typeof effectiveUtil.target.direction !== "undefined")) {
+      return -1;
+    }
+    return(this.robot_set_sens(effectiveUtil,index));
   }
 
   getSimTarget (util) {
@@ -506,6 +519,52 @@ robot_first_draw(util){
   return "no_drawable";
 }
 
+  sampleStageColor(util, pointVec3) {
+    const drawable = this.robot_first_draw(util);
+    if (drawable === "no_drawable") return [255, 255, 255];
+
+    const renderer = util && util.target ? util.target.renderer : null;
+    if (!renderer) return [255, 255, 255];
+
+    const sampleFn =
+      (renderer.constructor && typeof renderer.constructor.sampleColor3b === "function")
+        ? renderer.constructor.sampleColor3b
+        : null;
+    if (!sampleFn) return [255, 255, 255];
+
+    const out = [255, 255, 255];
+    const drawableSampleArg = (drawable && typeof drawable === "object" && drawable.drawable)
+      ? [drawable]
+      : [{drawable: drawable}];
+    try {
+      sampleFn(pointVec3, drawableSampleArg, out);
+      return out;
+    } catch (e) {
+      return [255, 255, 255];
+    }
+  }
+
+  getDistToWall(util, radians, startPoint, maxDist) {
+    const maxDistance = typeof maxDist === "number" ? maxDist : 100;
+    const step = 1;
+    for (let dist = 0; dist <= maxDistance; dist += step) {
+      const point = [
+        startPoint[0] + dist * Math.cos(radians),
+        startPoint[1] + dist * Math.sin(radians),
+        0
+      ];
+      const color = this.sampleStageColor(util, point);
+      if (
+        Math.abs(color[0] - this.wall_color[0]) <= 2 &&
+        Math.abs(color[1] - this.wall_color[1]) <= 2 &&
+        Math.abs(color[2] - this.wall_color[2]) <= 2
+      ) {
+        return dist;
+      }
+    }
+    return maxDistance;
+  }
+
   robot_set_direction_to(args, util){
 
         this.robot_direction = args.ROBOT_DIRECTION;
@@ -543,7 +602,7 @@ robot_first_draw(util){
     this.ddp = [];this.ddp[0]=util.target.x+this.robot_delta_x; this.ddp[1]=util.target.y+this.robot_delta_y; this.ddp[2]=0;this.ddp[3]=0;;
     this.ddd = []; this.ddd[0]=this.robot_first_draw(util);
     this.ddl = []; this.ddl[0]=this.wall_color[0];this.ddl[1]=this.wall_color[1];this.ddl[2]=this.wall_color[2];
-if(Renderer.getDist(this.ddp,this.ddd[0],radians,this.ddl)>20)
+if(this.getDistToWall(util, radians, this.ddp, 100)>20)
   return 0;
 return 100;
     }
@@ -562,7 +621,7 @@ return 100;
             this.ddd = []; this.ddd[0]=this.robot_first_draw(util);
             this.ddl = []; this.ddl[0]=this.wall_color[0];this.ddl[1]=this.wall_color[1];this.ddl[2]=this.wall_color[2];
 
-          return Renderer.getDist(this.ddp,this.ddd[0],radians,this.ddl);
+          return this.getDistToWall(util, radians, this.ddp, 100);
     }
 
   robot_set_sens(util,a){
@@ -590,10 +649,7 @@ return 100;
           dx = delta * Math.cos(radians);
           dy = delta * Math.sin(radians);
           p[0]=util.target.x+dx; p[1]=util.target.y+dy; p[2]=0;
-          var d = []; d[0]=this.robot_first_draw(util);
-          var c = [];c[0]=1;c[1]=1;c[2]=1;c[3]=1;
-          var l= [];
-          l = Renderer.getColor(p,d[0],c);
+          var l= this.sampleStageColor(util, p);
           sensor_data= Math.round(l[0]+l[1]+l[2])/3;
           //    console.warn("GET2"+sensor_data);
             return sensor_data;
@@ -607,10 +663,7 @@ return 100;
           dx = delta * Math.cos(radians);
           dy = delta * Math.sin(radians);
           p[0]=util.target.x+dx; p[1]=util.target.y+dy; p[2]=0;
-          var d = []; d[0]=this.robot_first_draw(util);
-          var c = [];c[0]=1;c[1]=1;c[2]=1;c[3]=1;
-          var l= [];
-          l = Renderer.getColor(p,d[0],c);
+          var l= this.sampleStageColor(util, p);
           return l;
           break;
           case 4: // touch
@@ -624,10 +677,7 @@ return 100;
           break;
           case 3: // light
           var p=[];p[0]=util.target.x; p[1]=util.target.y; p[2]=0;
-          var d = []; d[0]=this.robot_first_draw(util);
-          var c = [];c[0]=1;c[1]=1;c[2]=1;c[3]=1;
-          var l= [];
-          l = Renderer.getColor(p,d[0],c);
+          var l= this.sampleStageColor(util, p);
           sensor_data=255 - Math.round(l[0]+l[1]+l[2])/3;
           return sensor_data;
           break;
@@ -638,6 +688,9 @@ return 100;
   }
 
   robot_get_sensor_data(args, util){
+          if (util && util.target && typeof util.target.direction !== "undefined") {
+            this.last_util = util;
+          }
 
           var sensor = args.ROBOT_SENSORS;
           var sensor_data = null;
@@ -724,10 +777,7 @@ return 100;
 
       if(this.runtime.sim_ac){
         var p=[];  p[0]=util.target.x; p[1]=util.target.y; p[2]=0;
-        var d = []; d[0]=this.robot_first_draw(util);
-        var c = [];c[0]=1;c[1]=1;c[2]=1;c[3]=1;
-        var l= [];
-        l = Renderer.getColor(p,d[0],c);
+        var l= this.sampleStageColor(util, p);
   //      console.warn("result is"+l);
         switch (args.RGB_VALUES) {
 
