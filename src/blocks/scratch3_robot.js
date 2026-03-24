@@ -5,6 +5,14 @@ const Timer = require('../util/timer');
 const Renderer = require('scratch-render');
 const MOTORS_ON_DELTA = 50;
 const DEGREE_RATIO = 5.19;
+const SIM_SENSOR_PROBES_STORAGE_KEY = 'rs3.simSensorProbes';
+const DEFAULT_SIM_SENSOR_PROBES = [
+    {localX: 1, localY: 38, direction: 'forward'},
+    {localX: 18, localY: 30, direction: 'forward'},
+    {localX: 18, localY: -38, direction: 'backward'},
+    {localX: -14, localY: -38, direction: 'backward'},
+    {localX: -16.5, localY: 30, direction: 'forward'}
+];
 
 class Scratch3RobotBlocks {
     constructor (runtime) {
@@ -97,7 +105,76 @@ class Scratch3RobotBlocks {
         this.last_util = {};
         this.start_deg=0;
         this.runtime.on('PROJECT_STOP_ALL', this._onProjectStopAll.bind(this));
+        this.simSensorProbes = this._loadSimSensorProbes();
     }
+
+  _getDefaultSimSensorProbes () {
+    return DEFAULT_SIM_SENSOR_PROBES.map(p => ({
+      localX: p.localX,
+      localY: p.localY,
+      direction: p.direction
+    }));
+  }
+
+  _sanitizeSimSensorProbe (probe, fallbackProbe) {
+    const localX = Number(probe && probe.localX);
+    const localY = Number(probe && probe.localY);
+    const direction = (probe && probe.direction === 'backward') ? 'backward' : 'forward';
+    return {
+      localX: Number.isFinite(localX) ? localX : fallbackProbe.localX,
+      localY: Number.isFinite(localY) ? localY : fallbackProbe.localY,
+      direction: direction
+    };
+  }
+
+  _loadSimSensorProbes () {
+    const defaults = this._getDefaultSimSensorProbes();
+    try {
+      const storage = (typeof globalThis !== 'undefined') ? globalThis.localStorage : null;
+      if (!storage) return defaults;
+      const raw = storage.getItem(SIM_SENSOR_PROBES_STORAGE_KEY);
+      if (!raw) return defaults;
+      const parsed = JSON.parse(raw);
+      if (!Array.isArray(parsed)) return defaults;
+      return defaults.map((def, idx) => this._sanitizeSimSensorProbe(parsed[idx], def));
+    } catch (e) {
+      return defaults;
+    }
+  }
+
+  _saveSimSensorProbes () {
+    try {
+      const storage = (typeof globalThis !== 'undefined') ? globalThis.localStorage : null;
+      if (!storage) return;
+      storage.setItem(SIM_SENSOR_PROBES_STORAGE_KEY, JSON.stringify(this.simSensorProbes));
+    } catch (e) {
+      // Ignore storage write errors in restricted environments.
+    }
+  }
+
+  setSimSensorProbeConfig (index, localX, localY, direction) {
+    const probeIndex = Number(index) - 1;
+    if (probeIndex < 0 || probeIndex >= this.simSensorProbes.length) return false;
+    const fallback = this.simSensorProbes[probeIndex];
+    this.simSensorProbes[probeIndex] = this._sanitizeSimSensorProbe({localX, localY, direction}, fallback);
+    this._saveSimSensorProbes();
+    return true;
+  }
+
+  getSimSensorProbeConfig () {
+    return this.simSensorProbes.map((probe, idx) => ({
+      sensorIndex: idx + 1,
+      localX: probe.localX,
+      localY: probe.localY,
+      direction: probe.direction
+    }));
+  }
+
+  resetSimSensorProbeConfig () {
+    this.simSensorProbes = this._getDefaultSimSensorProbes();
+    this._saveSimSensorProbes();
+    return this.getSimSensorProbeConfig();
+  }
 
     /**
      * Stop robot motors and clear timers when project is stopped (Stop button).
@@ -167,6 +244,10 @@ class Scratch3RobotBlocks {
             robot_touch:this.robot_touch,
             robot_wall_color:this.robot_wall_color,
             getSensorDataFromLastUtil:this.getSensorDataFromLastUtil,
+            getSimSensorDebugData:this.getSimSensorDebugData,
+            setSimSensorProbeConfig:this.setSimSensorProbeConfig,
+            getSimSensorProbeConfig:this.getSimSensorProbeConfig,
+            resetSimSensorProbeConfig:this.resetSimSensorProbeConfig,
             robot_first_draw:this.robot_first_draw
         };
     }
@@ -203,6 +284,44 @@ class Scratch3RobotBlocks {
     if (!this.runtime.sim_ac) return util.target;
     const robot = this.runtime.targets.find(t => !t.isStage && t.sprite && t.sprite.name === 'Robbo Robot');
     return robot || util.target;
+  }
+
+  getSimSensorDebugData () {
+    if (!this.runtime || !this.runtime.sim_ac) return [];
+    const robot = this.runtime.targets.find(t => !t.isStage && t.sprite && t.sprite.name === 'Robbo Robot');
+    if (!robot) return [];
+    return this.simSensorProbes.map((sensorCfg, idx) => {
+      const ray = this.getSimSensorRay({target: robot}, idx);
+      const startX = ray.startPoint[0];
+      const startY = ray.startPoint[1];
+      const directionRadians = ray.directionRadians;
+      const endX = startX + 10 * Math.cos(directionRadians);
+      const endY = startY + 10 * Math.sin(directionRadians);
+      return {
+        sensorIndex: idx + 1,
+        startX: startX,
+        startY: startY,
+        endX: endX,
+        endY: endY
+      };
+    });
+  }
+
+  getSimSensorRay (util, sensorIndex) {
+    const sensorCfg = this.simSensorProbes[sensorIndex] || this.simSensorProbes[0];
+    const forwardRadians = MathUtil.degToRad(90 - util.target.direction);
+    const forwardX = Math.cos(forwardRadians);
+    const forwardY = Math.sin(forwardRadians);
+    const rightX = Math.cos(forwardRadians - Math.PI / 2);
+    const rightY = Math.sin(forwardRadians - Math.PI / 2);
+
+    const startX = util.target.x + (rightX * sensorCfg.localX) + (forwardX * sensorCfg.localY);
+    const startY = util.target.y + (rightY * sensorCfg.localX) + (forwardY * sensorCfg.localY);
+    const directionRadians = sensorCfg.direction === 'backward' ? (forwardRadians + Math.PI) : forwardRadians;
+    return {
+      startPoint: [startX, startY, 0],
+      directionRadians: directionRadians
+    };
   }
 
   robot_motors_on_for_seconds (args, util) {
@@ -589,47 +708,30 @@ robot_first_draw(util){
 
   }
 
-  robot_touch(util,a,angle,delta){
-
-    var radians = MathUtil.degToRad(90 - util.target.direction);
-    if(a==3 || a==2)
-    radians = MathUtil.degToRad(90 - util.target.direction+180);
-    const new_rad = MathUtil.degToRad(90 - util.target.direction+angle);
-    this.ddx = 1.5 * Math.cos(radians);
-    this.ddy = 1.5 * Math.sin(radians);
-    this.robot_delta_x = delta * Math.cos(new_rad);
-    this.robot_delta_y = delta * Math.sin(new_rad);
-    this.ddp = [];this.ddp[0]=util.target.x+this.robot_delta_x; this.ddp[1]=util.target.y+this.robot_delta_y; this.ddp[2]=0;this.ddp[3]=0;;
+  robot_touch(util,ray){
+    this.ddx = 1.5 * Math.cos(ray.directionRadians);
+    this.ddy = 1.5 * Math.sin(ray.directionRadians);
+    this.ddp = [];this.ddp[0]=ray.startPoint[0]; this.ddp[1]=ray.startPoint[1]; this.ddp[2]=0;this.ddp[3]=0;;
     this.ddd = []; this.ddd[0]=this.robot_first_draw(util);
     this.ddl = []; this.ddl[0]=this.wall_color[0];this.ddl[1]=this.wall_color[1];this.ddl[2]=this.wall_color[2];
-if(this.getDistToWall(util, radians, this.ddp, 100)>20)
+if(this.getDistToWall(util, ray.directionRadians, this.ddp, 100)>20)
   return 0;
 return 100;
     }
 
-  robot_get_dist(util,a,angle,delta){
-
-            var radians = MathUtil.degToRad(90 - util.target.direction);
-            if(a==3 || a==2)
-            radians = MathUtil.degToRad(90 - util.target.direction+180);
-            const new_rad = MathUtil.degToRad(90 - util.target.direction+angle);
-            this.ddx = 1.5 * Math.cos(radians);
-            this.ddy = 1.5 * Math.sin(radians);
-            this.robot_delta_x = delta * Math.cos(new_rad);
-            this.robot_delta_y = delta * Math.sin(new_rad);
-            this.ddp = [];this.ddp[0]=util.target.x+this.robot_delta_x; this.ddp[1]=util.target.y+this.robot_delta_y; this.ddp[2]=0;this.ddp[3]=0;;
+  robot_get_dist(util,ray){
+            this.ddx = 1.5 * Math.cos(ray.directionRadians);
+            this.ddy = 1.5 * Math.sin(ray.directionRadians);
+            this.ddp = [];this.ddp[0]=ray.startPoint[0]; this.ddp[1]=ray.startPoint[1]; this.ddp[2]=0;this.ddp[3]=0;;
             this.ddd = []; this.ddd[0]=this.robot_first_draw(util);
             this.ddl = []; this.ddl[0]=this.wall_color[0];this.ddl[1]=this.wall_color[1];this.ddl[2]=this.wall_color[2];
 
-          return this.getDistToWall(util, radians, this.ddp, 100);
+          return this.getDistToWall(util, ray.directionRadians, this.ddp, 100);
     }
 
   robot_set_sens(util,a){
       var radians=0,dx=0,dy=0;
-      const delta = 10;
-
-      var ang = 0;
-      if(a==1)ang=315;else if(a==2)ang=225;else if (a==3)ang=135;else if(a==4)ang=45;
+      const ray = this.getSimSensorRay(util, a);
       // In simulation the sensor types are selected in GUI and applied to RCA via `setRobotSensor`.
       // The sim sensor model used to read from `runtime.sens_list`, but `runtime.sens_list` is never updated.
       // So we read the selected type from `runtime.RCA.sensors_array[a]` instead.
@@ -645,10 +747,7 @@ return 100;
       break;
       case 1: // line
           var p=[];
-          radians = MathUtil.degToRad(90 - util.target.direction+ang);
-          dx = delta * Math.cos(radians);
-          dy = delta * Math.sin(radians);
-          p[0]=util.target.x+dx; p[1]=util.target.y+dy; p[2]=0;
+          p[0]=ray.startPoint[0]; p[1]=ray.startPoint[1]; p[2]=0;
           var l= this.sampleStageColor(util, p);
           sensor_data= Math.round(l[0]+l[1]+l[2])/3;
           //    console.warn("GET2"+sensor_data);
@@ -659,21 +758,18 @@ return 100;
             break;
           case 7: // color
           var p=[];
-          radians = MathUtil.degToRad(90 - util.target.direction+ang);
-          dx = delta * Math.cos(radians);
-          dy = delta * Math.sin(radians);
-          p[0]=util.target.x+dx; p[1]=util.target.y+dy; p[2]=0;
+          p[0]=ray.startPoint[0]; p[1]=ray.startPoint[1]; p[2]=0;
           var l= this.sampleStageColor(util, p);
           return l;
           break;
           case 4: // touch
-          return this.robot_touch(util,a,ang,delta);
+          return this.robot_touch(util,ray);
           break;
           case 5: // proximity
-          return Number(100-this.robot_get_dist(util,a,ang,delta));
+          return Number(100-this.robot_get_dist(util,ray));
           break;
           case 6: // ultrasonic
-          return this.robot_get_dist(util,a,ang,delta);
+          return this.robot_get_dist(util,ray);
           break;
           case 3: // light
           var p=[];p[0]=util.target.x; p[1]=util.target.y; p[2]=0;
