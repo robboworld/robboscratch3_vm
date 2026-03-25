@@ -1,3 +1,7 @@
+const md5 = require('js-md5');
+
+const SB3_ASSET_ID_HEX = /^[a-fA-F0-9]{32}$/;
+
 /**
  * Serialize all the assets of the given type ('sounds' or 'costumes')
  * in the provided runtime into an array of file descriptors.
@@ -17,8 +21,13 @@ const serializeAssets = function (runtime, assetType, optTargetId) {
         for (let j = 0; j < currAssets.length; j++) {
             const currAsset = currAssets[j];
             const asset = currAsset.asset;
+            let fileAssetId = asset.assetId;
+            if (assetType === 'costumes' && asset && asset.data &&
+                !SB3_ASSET_ID_HEX.test(String(fileAssetId))) {
+                fileAssetId = md5(asset.data);
+            }
             assetDescs.push({
-                fileName: `${asset.assetId}.${asset.dataFormat}`,
+                fileName: `${fileAssetId}.${asset.dataFormat}`,
                 fileContent: asset.data});
         }
     }

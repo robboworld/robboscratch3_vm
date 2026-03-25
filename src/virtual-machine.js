@@ -373,17 +373,29 @@ class VirtualMachine extends EventEmitter {
             input = JSON.stringify(input);
         }
 
-        const validationPromise = new Promise((resolve, reject) => {
+        let loadInput = input;
+
+        const prepareSb3Repair = () => {
+            if (loadInput instanceof ArrayBuffer) {
+                return sb3.repairSb3ZipNonHexCostumeAssetIds(loadInput).then(fixed => {
+                    loadInput = fixed;
+                });
+            }
+            return Promise.resolve();
+        };
+
+        const validationPromise = prepareSb3Repair()
+            .then(() => new Promise((resolve, reject) => {
             // The second argument of false below indicates to the validator that the
             // input should be parsed/validated as an entire project (and not a single sprite)
-            validate(input, false, (error, res) => {
+            validate(loadInput, false, (error, res) => {
                 if (error) return reject(error);
                 resolve(res);
             });
-        })
+        }))
             .catch(error => {
                 try {
-                    const sb1 = new SB1File(input);
+                    const sb1 = new SB1File(loadInput);
                     const json = sb1.json;
                     json.projectVersion = 2;
                     return Promise.resolve([json, sb1.zip]);

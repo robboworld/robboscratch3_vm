@@ -17,9 +17,14 @@ const MathUtil = require('../util/math-util');
 const StringUtil = require('../util/string-util');
 const VariableUtil = require('../util/variable-util');
 
+const JSZip = require('jszip');
+const md5 = require('js-md5');
 const {loadCostume} = require('../import/load-costume.js');
 const {loadSound} = require('../import/load-sound.js');
 const {deserializeCostume, deserializeSound} = require('./deserialize-assets.js');
+
+/** Scratch SB3 schema: assetId must be 32 hex chars (content md5). */
+const SB3_ASSET_ID_HEX = /^[a-fA-F0-9]{32}$/;
 
 const hasOwnProperty = Object.prototype.hasOwnProperty;
 
@@ -352,13 +357,35 @@ const serializeBlocks = function (blocks) {
 };
 
 /**
+ * Library costumes (e.g. Robbo simulator) may use a filename stem as assetId; SB3 requires 32-hex md5 of file bytes.
+ * @param {!object} costume runtime costume
+ * @return {{assetId: *, md5ext: string}}
+ */
+const normalizeSb3CostumeAsset = function (costume) {
+    const ext = costume.dataFormat.toLowerCase();
+    const idStr = costume.assetId != null ? String(costume.assetId) : '';
+    if (SB3_ASSET_ID_HEX.test(idStr)) {
+        return {assetId: idStr, md5ext: `${idStr}.${ext}`};
+    }
+    const data = costume.asset && costume.asset.data;
+    if (data) {
+        const hexId = md5(data);
+        if (hexId && SB3_ASSET_ID_HEX.test(hexId)) {
+            return {assetId: hexId, md5ext: `${hexId}.${ext}`};
+        }
+    }
+    return {assetId: costume.assetId, md5ext: costume.md5};
+};
+
+/**
  * Serialize the given costume.
  * @param {object} costume The costume to be serialized.
  * @return {object} A serialized representation of the costume.
  */
 const serializeCostume = function (costume) {
+    const norm = normalizeSb3CostumeAsset(costume);
     const obj = Object.create(null);
-    obj.assetId = costume.assetId;
+    obj.assetId = norm.assetId;
     obj.name = costume.name;
     obj.bitmapResolution = costume.bitmapResolution;
     // serialize this property with the name 'md5ext' because that's
@@ -366,7 +393,7 @@ const serializeCostume = function (costume) {
     // updated to actually refer to this as 'md5ext' instead of 'md5'
     // but that change should be made carefully since it is very
     // pervasive
-    obj.md5ext = costume.md5;
+    obj.md5ext = norm.md5ext;
     obj.dataFormat = costume.dataFormat.toLowerCase();
     obj.rotationCenterX = costume.rotationCenterX;
     obj.rotationCenterY = costume.rotationCenterY;
@@ -1236,10 +1263,65 @@ const deserialize = function (json, runtime, zip, isSingleSprite) {
         }));
 };
 
+/**
+ * Fix invalid SB3 projects saved before costume assetId normalization: rewrite project.json
+ * and add correctly named asset files in the zip (md5 of bytes).
+ * @param {!ArrayBuffer} arrayBuffer sb3 file
+ * @return {!Promise<!ArrayBuffer>} repaired buffer or original on failure/no-op
+ */
+const repairSb3ZipNonHexCostumeAssetIds = function (arrayBuffer) {
+    return JSZip.loadAsync(arrayBuffer)
+        .then(zip => {
+            const pj = zip.file('project.json');
+            if (!pj) return null;
+            return Promise.all([zip, pj.async('string')]);
+        })
+        .then(pair => {
+            if (!pair) return arrayBuffer;
+            const [zip, txt] = pair;
+            let project;
+            try {
+                project = JSON.parse(txt);
+            } catch (e) {
+                return arrayBuffer;
+            }
+            const tasks = [];
+            if (project.targets) {
+                for (let ti = 0; ti < project.targets.length; ti++) {
+                    const target = project.targets[ti];
+                    if (!target.costumes) continue;
+                    for (let ci = 0; ci < target.costumes.length; ci++) {
+                        const c = target.costumes[ci];
+                        const aid = c.assetId != null ? String(c.assetId) : '';
+                        if (SB3_ASSET_ID_HEX.test(aid)) continue;
+                        const ext = (c.dataFormat || 'png').toLowerCase();
+                        const md5ext = c.md5ext || `${c.assetId}.${ext}`;
+                        const file = zip.file(md5ext) || (c.assetId && zip.file(`${c.assetId}.${ext}`));
+                        if (!file) continue;
+                        tasks.push(file.async('uint8array').then(data => {
+                            const hexId = md5(data);
+                            if (!SB3_ASSET_ID_HEX.test(hexId)) return;
+                            c.assetId = hexId;
+                            c.md5ext = `${hexId}.${ext}`;
+                            zip.file(`${hexId}.${ext}`, data);
+                        }));
+                    }
+                }
+            }
+            if (tasks.length === 0) return arrayBuffer;
+            return Promise.all(tasks).then(() => {
+                zip.file('project.json', JSON.stringify(project));
+                return zip.generateAsync({type: 'arraybuffer'});
+            });
+        })
+        .catch(() => arrayBuffer);
+};
+
 module.exports = {
     serialize: serialize,
     deserialize: deserialize,
     deserializeBlocks: deserializeBlocks,
     serializeBlocks: serializeBlocks,
-    getExtensionIdForOpcode: getExtensionIdForOpcode
+    getExtensionIdForOpcode: getExtensionIdForOpcode,
+    repairSb3ZipNonHexCostumeAssetIds: repairSb3ZipNonHexCostumeAssetIds
 };
