@@ -853,7 +853,8 @@ robot_first_draw(util){
       let sensor_id = Number(args.ROBOT_SENSORS_FOR_RGB.replace("sensor","")) - 1;
 
       if(this.runtime.sim_ac){
-        var p=[];  p[0]=util.target.x; p[1]=util.target.y; p[2]=0;
+        const ray = this.getSimSensorRay(util, sensor_id);
+        var p=[];  p[0]=ray.startPoint[0]; p[1]=ray.startPoint[1]; p[2]=0;
         var l= this.sampleStageColor(util, p);
   //      console.warn("result is"+l);
         switch (args.RGB_VALUES) {
@@ -915,7 +916,7 @@ robot_first_draw(util){
 
     }
 
-  robot_is_current_color(args){
+  robot_is_current_color(args, util){
 
     //   console.log(`robot_is_current_color   sensor: ${args.ROBOT_SENSORS_FOR_RGB} color: ${args.COLORS} `);
 
@@ -923,7 +924,17 @@ robot_first_draw(util){
 
        let color = args.COLORS;
 
-       let current_color = this.runtime.RCA.colorFilter(sensor_id,true);
+       let current_color;
+       if(this.runtime.sim_ac){
+          const ray = this.getSimSensorRay(util, sensor_id);
+          var p=[];  p[0]=ray.startPoint[0]; p[1]=ray.startPoint[1]; p[2]=0;
+          var rgb = this.sampleStageColor(util, p);
+          current_color = this.runtime.RCA.colorFilterFromRGB(rgb[0], rgb[1], rgb[2], sensor_id, 765, true);
+       }
+       else
+       {
+         current_color = this.runtime.RCA.colorFilter(sensor_id,true);
+       }
 
        if ((color == "unknown") && (Array.isArray(current_color))){
 

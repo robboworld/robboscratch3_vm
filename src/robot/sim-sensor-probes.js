@@ -34,7 +34,7 @@ const DEFAULT_SIM_SENSOR_PROBES = [
 ];
 
 /** Default max hit distance along touch ray (stage units) for touch sensor value 100. */
-const DEFAULT_SIM_TOUCH_MAX_HIT_DISTANCE = 8;
+const DEFAULT_SIM_TOUCH_MAX_HIT_DISTANCE = 10;
 
 /** Upper bound for touchMaxHitDistance (matches typical getDistToWall max scan). */
 const MAX_SIM_TOUCH_MAX_HIT_DISTANCE = 100;
