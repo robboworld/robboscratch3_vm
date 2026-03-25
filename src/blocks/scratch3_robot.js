@@ -726,13 +726,13 @@ robot_first_draw(util){
       case 0: // nosensor
           return -1;
       break;
-      case 1: // line
+      case 1: // line — same scale as RobotControlAPI.getSensorData (case 1): raw 0–255 → 0–100 via /2.55
           var p=[];
           p[0]=ray.startPoint[0]; p[1]=ray.startPoint[1]; p[2]=0;
           var l= this.sampleStageColor(util, p);
-          sensor_data= Math.round(l[0]+l[1]+l[2])/3;
-          //    console.warn("GET2"+sensor_data);
-            return sensor_data;
+          sensor_data = Math.round(l[0] + l[1] + l[2]) / 3;
+          var lineOut = Math.round(sensor_data / 2.55);
+            return lineOut;
             break;
             case 2: // led
             return -1;
