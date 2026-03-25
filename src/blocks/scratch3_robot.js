@@ -5,14 +5,14 @@ const Timer = require('../util/timer');
 const Renderer = require('scratch-render');
 const MOTORS_ON_DELTA = 50;
 const DEGREE_RATIO = 5.19;
-const SIM_SENSOR_PROBES_STORAGE_KEY = 'rs3.simSensorProbes';
-const DEFAULT_SIM_SENSOR_PROBES = [
-    {localX: 1, localY: 38, direction: 'forward'},
-    {localX: 18, localY: 30, direction: 'forward'},
-    {localX: 18, localY: -38, direction: 'backward'},
-    {localX: -14, localY: -38, direction: 'backward'},
-    {localX: -16.5, localY: 30, direction: 'forward'}
-];
+const {
+    loadSimSensorProbes,
+    saveSimSensorProbes,
+    cloneDefaultProbes,
+    sanitizeSimSensorProbe,
+    stageOffsetFromProbeAt100Percent,
+    simSensorDebugRayLengthStageUnits
+} = require('../robot/sim-sensor-probes');
 
 class Scratch3RobotBlocks {
     constructor (runtime) {
@@ -105,59 +105,15 @@ class Scratch3RobotBlocks {
         this.last_util = {};
         this.start_deg=0;
         this.runtime.on('PROJECT_STOP_ALL', this._onProjectStopAll.bind(this));
-        this.simSensorProbes = this._loadSimSensorProbes();
+        this.simSensorProbes = loadSimSensorProbes();
     }
-
-  _getDefaultSimSensorProbes () {
-    return DEFAULT_SIM_SENSOR_PROBES.map(p => ({
-      localX: p.localX,
-      localY: p.localY,
-      direction: p.direction
-    }));
-  }
-
-  _sanitizeSimSensorProbe (probe, fallbackProbe) {
-    const localX = Number(probe && probe.localX);
-    const localY = Number(probe && probe.localY);
-    const direction = (probe && probe.direction === 'backward') ? 'backward' : 'forward';
-    return {
-      localX: Number.isFinite(localX) ? localX : fallbackProbe.localX,
-      localY: Number.isFinite(localY) ? localY : fallbackProbe.localY,
-      direction: direction
-    };
-  }
-
-  _loadSimSensorProbes () {
-    const defaults = this._getDefaultSimSensorProbes();
-    try {
-      const storage = (typeof globalThis !== 'undefined') ? globalThis.localStorage : null;
-      if (!storage) return defaults;
-      const raw = storage.getItem(SIM_SENSOR_PROBES_STORAGE_KEY);
-      if (!raw) return defaults;
-      const parsed = JSON.parse(raw);
-      if (!Array.isArray(parsed)) return defaults;
-      return defaults.map((def, idx) => this._sanitizeSimSensorProbe(parsed[idx], def));
-    } catch (e) {
-      return defaults;
-    }
-  }
-
-  _saveSimSensorProbes () {
-    try {
-      const storage = (typeof globalThis !== 'undefined') ? globalThis.localStorage : null;
-      if (!storage) return;
-      storage.setItem(SIM_SENSOR_PROBES_STORAGE_KEY, JSON.stringify(this.simSensorProbes));
-    } catch (e) {
-      // Ignore storage write errors in restricted environments.
-    }
-  }
 
   setSimSensorProbeConfig (index, localX, localY, direction) {
     const probeIndex = Number(index) - 1;
     if (probeIndex < 0 || probeIndex >= this.simSensorProbes.length) return false;
     const fallback = this.simSensorProbes[probeIndex];
-    this.simSensorProbes[probeIndex] = this._sanitizeSimSensorProbe({localX, localY, direction}, fallback);
-    this._saveSimSensorProbes();
+    this.simSensorProbes[probeIndex] = sanitizeSimSensorProbe({localX, localY, direction}, fallback);
+    saveSimSensorProbes(this.simSensorProbes);
     return true;
   }
 
@@ -171,8 +127,8 @@ class Scratch3RobotBlocks {
   }
 
   resetSimSensorProbeConfig () {
-    this.simSensorProbes = this._getDefaultSimSensorProbes();
-    this._saveSimSensorProbes();
+    this.simSensorProbes = cloneDefaultProbes();
+    saveSimSensorProbes(this.simSensorProbes);
     return this.getSimSensorProbeConfig();
   }
 
@@ -295,8 +251,9 @@ class Scratch3RobotBlocks {
       const startX = ray.startPoint[0];
       const startY = ray.startPoint[1];
       const directionRadians = ray.directionRadians;
-      const endX = startX + 10 * Math.cos(directionRadians);
-      const endY = startY + 10 * Math.sin(directionRadians);
+      const rayLen = simSensorDebugRayLengthStageUnits(robot.size);
+      const endX = startX + rayLen * Math.cos(directionRadians);
+      const endY = startY + rayLen * Math.sin(directionRadians);
       return {
         sensorIndex: idx + 1,
         startX: startX,
@@ -315,8 +272,16 @@ class Scratch3RobotBlocks {
     const rightX = Math.cos(forwardRadians - Math.PI / 2);
     const rightY = Math.sin(forwardRadians - Math.PI / 2);
 
-    const startX = util.target.x + (rightX * sensorCfg.localX) + (forwardX * sensorCfg.localY);
-    const startY = util.target.y + (rightY * sensorCfg.localX) + (forwardY * sensorCfg.localY);
+    const {dx, dy} = stageOffsetFromProbeAt100Percent(
+      sensorCfg,
+      util.target.size,
+      forwardX,
+      forwardY,
+      rightX,
+      rightY
+    );
+    const startX = util.target.x + dx;
+    const startY = util.target.y + dy;
     const directionRadians = sensorCfg.direction === 'backward' ? (forwardRadians + Math.PI) : forwardRadians;
     return {
       startPoint: [startX, startY, 0],
