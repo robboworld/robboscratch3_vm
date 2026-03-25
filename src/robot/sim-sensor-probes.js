@@ -10,6 +10,9 @@
  * Legacy storage (raw JSON array): values were stage offsets independent of sprite size,
  * tuned for a ~25% library robot. On load they are converted to the contract above by
  * multiplying coordinates by (100 / LEGACY_CALIBRATION_SIZE_PERCENT).
+ *
+ * v2 payload may also include touchMaxHitDistance: max ray distance (stage units, integer)
+ * at which the simulated touch sensor still reads 100 (same step as getDistToWall).
  */
 
 const STORAGE_KEY = 'rs3.simSensorProbes';
@@ -30,6 +33,12 @@ const DEFAULT_SIM_SENSOR_PROBES = [
     {localX: -66, localY: 120, direction: 'forward'}
 ];
 
+/** Default max hit distance along touch ray (stage units) for touch sensor value 100. */
+const DEFAULT_SIM_TOUCH_MAX_HIT_DISTANCE = 8;
+
+/** Upper bound for touchMaxHitDistance (matches typical getDistToWall max scan). */
+const MAX_SIM_TOUCH_MAX_HIT_DISTANCE = 100;
+
 /** Stage units for debug ray at size 100%; keeps apparent arrow length ~10 at size 25%. */
 const SIM_SENSOR_DEBUG_RAY_LENGTH_AT_SIZE100 = 40;
 
@@ -46,6 +55,24 @@ function sanitizeSimSensorProbe (probe, fallbackProbe) {
         localY: Number.isFinite(localY) ? localY : fallbackProbe.localY,
         direction: direction
     };
+}
+
+/**
+ * @param {*} value
+ * @returns {number} integer in [0, MAX_SIM_TOUCH_MAX_HIT_DISTANCE]
+ */
+function sanitizeTouchMaxHitDistance (value) {
+    const n = Math.round(Number(value));
+    if (!Number.isFinite(n)) {
+        return DEFAULT_SIM_TOUCH_MAX_HIT_DISTANCE;
+    }
+    if (n < 0) {
+        return 0;
+    }
+    if (n > MAX_SIM_TOUCH_MAX_HIT_DISTANCE) {
+        return MAX_SIM_TOUCH_MAX_HIT_DISTANCE;
+    }
+    return n;
 }
 
 function cloneDefaultProbes () {
@@ -101,19 +128,78 @@ function normalizeV2Probes (rawProbes) {
     return defaults.map((def, idx) => sanitizeSimSensorProbe(rawProbes[idx], def));
 }
 
-function loadSimSensorProbes () {
+/**
+ * @param {Array} probes
+ * @param {number} touchMaxHitDistance
+ */
+function saveSimSensorCalibration (probes, touchMaxHitDistance) {
+    try {
+        const storage = (typeof globalThis !== 'undefined') ? globalThis.localStorage : null;
+        if (!storage || !Array.isArray(probes)) {
+            return;
+        }
+        const touch = sanitizeTouchMaxHitDistance(touchMaxHitDistance);
+        const payload = {
+            schemaVersion: SCHEMA_VERSION,
+            probes: probes.map(p => ({
+                localX: p.localX,
+                localY: p.localY,
+                direction: p.direction
+            })),
+            touchMaxHitDistance: touch
+        };
+        storage.setItem(STORAGE_KEY, JSON.stringify(payload));
+    } catch (e) {
+        // Ignore storage write errors in restricted environments.
+    }
+}
+
+/**
+ * Saves probes; if touchMaxHitDistance omitted, keeps existing value from storage (does not default to 1).
+ * Prefer saveSimSensorCalibration from app code when both values are known.
+ */
+function saveSimSensorProbes (probes, touchMaxHitDistance) {
+    let touch = touchMaxHitDistance;
+    if (touch === undefined || touch === null) {
+        try {
+            const storage = (typeof globalThis !== 'undefined') ? globalThis.localStorage : null;
+            if (storage) {
+                const raw = storage.getItem(STORAGE_KEY);
+                if (raw) {
+                    const parsed = JSON.parse(raw);
+                    if (parsed && (parsed.touchMaxHitDistance !== undefined && parsed.touchMaxHitDistance !== null)) {
+                        touch = sanitizeTouchMaxHitDistance(parsed.touchMaxHitDistance);
+                    }
+                }
+            }
+        } catch (e) {
+            // fall through to default
+        }
+        if (touch === undefined || touch === null) {
+            touch = DEFAULT_SIM_TOUCH_MAX_HIT_DISTANCE;
+        }
+    }
+    saveSimSensorCalibration(probes, touch);
+}
+
+/**
+ * @returns {{ probes: Array, touchMaxHitDistance: number }}
+ */
+function loadSimSensorCalibration () {
     const defaults = cloneDefaultProbes();
+    const defaultTouch = DEFAULT_SIM_TOUCH_MAX_HIT_DISTANCE;
     try {
         const storage = (typeof globalThis !== 'undefined') ? globalThis.localStorage : null;
         if (!storage) {
-            return defaults;
+            return {probes: defaults, touchMaxHitDistance: defaultTouch};
         }
         const raw = storage.getItem(STORAGE_KEY);
         if (!raw) {
-            return defaults;
+            return {probes: defaults, touchMaxHitDistance: defaultTouch};
         }
         const parsed = JSON.parse(raw);
         let probes;
+        let touchMaxHitDistance = defaultTouch;
         let needsResave = false;
 
         if (Array.isArray(parsed)) {
@@ -123,52 +209,46 @@ function loadSimSensorProbes () {
             const ver = Number(parsed.schemaVersion);
             if (ver >= SCHEMA_VERSION && Array.isArray(parsed.probes)) {
                 probes = normalizeV2Probes(parsed.probes);
+                if (parsed.touchMaxHitDistance !== undefined && parsed.touchMaxHitDistance !== null) {
+                    touchMaxHitDistance = sanitizeTouchMaxHitDistance(parsed.touchMaxHitDistance);
+                } else {
+                    needsResave = true;
+                }
             } else if (Array.isArray(parsed.probes)) {
                 probes = migrateLegacyProbeList(parsed.probes);
                 needsResave = true;
             } else {
-                return defaults;
+                return {probes: defaults, touchMaxHitDistance: defaultTouch};
             }
         } else {
-            return defaults;
+            return {probes: defaults, touchMaxHitDistance: defaultTouch};
         }
 
         if (needsResave) {
-            saveSimSensorProbes(probes);
+            saveSimSensorCalibration(probes, touchMaxHitDistance);
         }
-        return probes;
+        return {probes, touchMaxHitDistance};
     } catch (e) {
-        return defaults;
+        return {probes: defaults, touchMaxHitDistance: defaultTouch};
     }
 }
 
-function saveSimSensorProbes (probes) {
-    try {
-        const storage = (typeof globalThis !== 'undefined') ? globalThis.localStorage : null;
-        if (!storage || !Array.isArray(probes)) {
-            return;
-        }
-        const payload = {
-            schemaVersion: SCHEMA_VERSION,
-            probes: probes.map(p => ({
-                localX: p.localX,
-                localY: p.localY,
-                direction: p.direction
-            }))
-        };
-        storage.setItem(STORAGE_KEY, JSON.stringify(payload));
-    } catch (e) {
-        // Ignore storage write errors in restricted environments.
-    }
+function loadSimSensorProbes () {
+    return loadSimSensorCalibration().probes;
 }
 
 module.exports = {
     STORAGE_KEY,
     SCHEMA_VERSION,
     DEFAULT_SIM_SENSOR_PROBES,
+    DEFAULT_SIM_TOUCH_MAX_HIT_DISTANCE,
+    MAX_SIM_TOUCH_MAX_HIT_DISTANCE,
     LEGACY_CALIBRATION_SIZE_PERCENT,
     sanitizeSimSensorProbe,
+    sanitizeTouchMaxHitDistance,
     cloneDefaultProbes,
+    loadSimSensorCalibration,
+    saveSimSensorCalibration,
     loadSimSensorProbes,
     saveSimSensorProbes,
     stageOffsetFromProbeAt100Percent,

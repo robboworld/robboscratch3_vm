@@ -6,10 +6,11 @@ const Renderer = require('scratch-render');
 const MOTORS_ON_DELTA = 50;
 const DEGREE_RATIO = 5.19;
 const {
-    loadSimSensorProbes,
-    saveSimSensorProbes,
+    loadSimSensorCalibration,
+    saveSimSensorCalibration,
     cloneDefaultProbes,
     sanitizeSimSensorProbe,
+    sanitizeTouchMaxHitDistance,
     stageOffsetFromProbeAt100Percent,
     simSensorDebugRayLengthStageUnits
 } = require('../robot/sim-sensor-probes');
@@ -105,7 +106,9 @@ class Scratch3RobotBlocks {
         this.last_util = {};
         this.start_deg=0;
         this.runtime.on('PROJECT_STOP_ALL', this._onProjectStopAll.bind(this));
-        this.simSensorProbes = loadSimSensorProbes();
+        const simCal = loadSimSensorCalibration();
+        this.simSensorProbes = simCal.probes;
+        this.simTouchMaxHitDistance = simCal.touchMaxHitDistance;
     }
 
   setSimSensorProbeConfig (index, localX, localY, direction) {
@@ -113,7 +116,7 @@ class Scratch3RobotBlocks {
     if (probeIndex < 0 || probeIndex >= this.simSensorProbes.length) return false;
     const fallback = this.simSensorProbes[probeIndex];
     this.simSensorProbes[probeIndex] = sanitizeSimSensorProbe({localX, localY, direction}, fallback);
-    saveSimSensorProbes(this.simSensorProbes);
+    saveSimSensorCalibration(this.simSensorProbes, this.simTouchMaxHitDistance);
     return true;
   }
 
@@ -128,8 +131,18 @@ class Scratch3RobotBlocks {
 
   resetSimSensorProbeConfig () {
     this.simSensorProbes = cloneDefaultProbes();
-    saveSimSensorProbes(this.simSensorProbes);
+    saveSimSensorCalibration(this.simSensorProbes, this.simTouchMaxHitDistance);
     return this.getSimSensorProbeConfig();
+  }
+
+  getSimTouchMaxHitDistance () {
+    return this.simTouchMaxHitDistance;
+  }
+
+  setSimTouchMaxHitDistance (maxHit) {
+    this.simTouchMaxHitDistance = sanitizeTouchMaxHitDistance(maxHit);
+    saveSimSensorCalibration(this.simSensorProbes, this.simTouchMaxHitDistance);
+    return this.simTouchMaxHitDistance;
   }
 
     /**
@@ -204,6 +217,8 @@ class Scratch3RobotBlocks {
             setSimSensorProbeConfig:this.setSimSensorProbeConfig,
             getSimSensorProbeConfig:this.getSimSensorProbeConfig,
             resetSimSensorProbeConfig:this.resetSimSensorProbeConfig,
+            getSimTouchMaxHitDistance:this.getSimTouchMaxHitDistance,
+            setSimTouchMaxHitDistance:this.setSimTouchMaxHitDistance,
             robot_first_draw:this.robot_first_draw
         };
     }
@@ -679,9 +694,10 @@ robot_first_draw(util){
     this.ddp = [];this.ddp[0]=ray.startPoint[0]; this.ddp[1]=ray.startPoint[1]; this.ddp[2]=0;this.ddp[3]=0;;
     this.ddd = []; this.ddd[0]=this.robot_first_draw(util);
     this.ddl = []; this.ddl[0]=this.wall_color[0];this.ddl[1]=this.wall_color[1];this.ddl[2]=this.wall_color[2];
-if(this.getDistToWall(util, ray.directionRadians, this.ddp, 100)>20)
-  return 0;
-return 100;
+    if (this.getDistToWall(util, ray.directionRadians, this.ddp, 100) > this.simTouchMaxHitDistance) {
+      return 0;
+    }
+    return 100;
     }
 
   robot_get_dist(util,ray){
