@@ -304,6 +304,47 @@ class Scratch3RobotBlocks {
     };
   }
 
+  /**
+   * One 2D-sim tick: integrate translation (wall collision), then differential rotation.
+   * Encoder counters (sim_dist_*, and distl/distr when trackDist) increase only if the
+   * robot actually moved or turned — not when motors command motion but the wall blocks it.
+   * @param {object} target - robot sprite target
+   * @param {number} pl - left motor sim power (same scale as this.sim_pl)
+   * @param {number} pr - right motor sim power
+   * @param {Object} [options] Optional; if `options.trackDist` is true, also updates distl/distr.
+   */
+  _simStepMotorSimulation (target, pl, pr, options) {
+    const trackDist = options && options.trackDist;
+    const prevX = this.xc;
+    const prevY = this.yc;
+    const radians = MathUtil.degToRad(90 - target.direction);
+    const dist = (pl + pr) / 2 * this.kW;
+    const dx = dist * Math.cos(radians);
+    const dy = dist * Math.sin(radians);
+    this.yc += dy;
+    this.xc += dx;
+    target.setXY(this.xc, this.yc);
+    if (target.isTouchingColor(this.wall_color)) {
+      this.yc -= dy;
+      this.xc -= dx;
+      target.setXY(this.xc, this.yc);
+    }
+    const deltaDeg = MathUtil.radToDeg(Math.atan((pl - pr) / this.rad));
+    target.setDirection(target.direction + deltaDeg);
+    const moved = this.xc !== prevX || this.yc !== prevY;
+    const rotated = Math.abs(deltaDeg) > 1e-9;
+    if (moved || rotated) {
+      const dl = Math.abs(pl * this.kW);
+      const dr = Math.abs(pr * this.kW);
+      this.sim_dist_l += dl;
+      this.sim_dist_r += dr;
+      if (trackDist) {
+        this.distl += dl;
+        this.distr += dr;
+      }
+    }
+  }
+
   robot_motors_on_for_seconds (args, util) {
 
 
@@ -355,21 +396,7 @@ class Scratch3RobotBlocks {
               this.yc=simTarget.y;
               simTarget.setXY(this.xc, this.yc);
               this.sim_int = setInterval(() => {
-             const radians = MathUtil.degToRad(90 - simTarget.direction);
-             let dist = (this.sim_pl+this.sim_pr)/2*this.kW;
-             this.sim_dist_l+=Math.abs(this.sim_pl*this.kW);
-             this.sim_dist_r+=Math.abs(this.sim_pr*this.kW);
-             const dx = dist * Math.cos(radians);
-             const dy = dist * Math.sin(radians);
-             this.yc+=dy;
-             this.xc+=dx;
-             simTarget.setXY(this.xc, this.yc);
-             if(simTarget.isTouchingColor(this.wall_color)){
-               this.yc-=dy;
-               this.xc-=dx;
-               simTarget.setXY(this.xc, this.yc);
-             }
-             simTarget.setDirection(simTarget.direction + MathUtil.radToDeg(Math.atan((this.sim_pl-this.sim_pr)/this.rad)));
+                this._simStepMotorSimulation(simTarget, this.sim_pl, this.sim_pr, {trackDist: false});
               }, this.fps);
           }
           else
@@ -402,35 +429,9 @@ class Scratch3RobotBlocks {
       this.xc=simTarget.x;
       this.yc=simTarget.y;
       simTarget.setXY(this.xc, this.yc);
-      const radians = MathUtil.degToRad(90 - simTarget.direction);
-      let dist = (this.sim_pl+this.sim_pr)/2*this.kW;
-      const dx = dist * Math.cos(radians);
-      const dy = dist * Math.sin(radians);
-      this.yc+=dy;
-      this.xc+=dx;
-      simTarget.setXY(this.xc, this.yc);
-      if(simTarget.isTouchingColor(this.wall_color)){
-        this.yc-=dy;
-        this.xc-=dx;
-        simTarget.setXY(this.xc, this.yc);
-      }
-      simTarget.setDirection(simTarget.direction + MathUtil.radToDeg(Math.atan((this.sim_pl-this.sim_pr)/this.rad)));
+      this._simStepMotorSimulation(simTarget, this.sim_pl, this.sim_pr, {trackDist: false});
       this.sim_int = setInterval(() => {
-        const radians = MathUtil.degToRad(90 - simTarget.direction);
-        let dist = (this.sim_pl+this.sim_pr)/2*this.kW;
-        this.sim_dist_l+=Math.abs(this.sim_pl*this.kW);
-        this.sim_dist_r+=Math.abs(this.sim_pr*this.kW);
-        const dx = dist * Math.cos(radians);
-        const dy = dist * Math.sin(radians);
-        this.yc+=dy;
-        this.xc+=dx;
-        simTarget.setXY(this.xc, this.yc);
-        if(simTarget.isTouchingColor(this.wall_color)){
-          this.yc-=dy;
-          this.xc-=dx;
-          simTarget.setXY(this.xc, this.yc);
-        }
-        simTarget.setDirection(simTarget.direction + MathUtil.radToDeg(Math.atan((this.sim_pl-this.sim_pr)/this.rad)));
+        this._simStepMotorSimulation(simTarget, this.sim_pl, this.sim_pr, {trackDist: false});
       }, this.fps);
   }
   else{
@@ -1146,24 +1147,8 @@ robot_first_draw(util){
             this.distl=0;
             this.distr=0;
             this.sim_int = setInterval(() => {
-             const radians = MathUtil.degToRad(90 - simTarget.direction);
-             let dist = (this.sim_pl+this.sim_pr)/2*this.kW;
-             this.sim_dist_l+=Math.abs(this.sim_pl*this.kW);
-             this.sim_dist_r+=Math.abs(this.sim_pr*this.kW);
-             this.distl+=Math.abs(this.sim_pl*this.kW);
-             this.distr+=Math.abs(this.sim_pr*this.kW);
-             const dx = dist * Math.cos(radians);
-             const dy = dist * Math.sin(radians);
-             this.yc+=dy;
-             this.xc+=dx;
-             simTarget.setXY(this.xc, this.yc);
-             if(simTarget.isTouchingColor(this.wall_color)){
-               this.yc-=dy;
-               this.xc-=dx;
-               simTarget.setXY(this.xc, this.yc);
-             }
-             simTarget.setDirection(simTarget.direction + MathUtil.radToDeg(Math.atan((this.sim_pl-this.sim_pr)/this.rad)));
-              }, this.fps);
+              this._simStepMotorSimulation(simTarget, this.sim_pl, this.sim_pr, {trackDist: true});
+            }, this.fps);
           }
           else {
             this.runtime.RCA.setRobotPowerAndStepLimits(this.power_left,this.power_right,util.stackFrame.steps,0);
@@ -1249,18 +1234,7 @@ robot_first_draw(util){
           this.xc=util.target.x;
           this.yc=util.target.y;
           this.sim_int = setInterval(() => {
-          const radians = MathUtil.degToRad(90 - util.target.direction);
-          let dist = (simpl+simpr)/2*this.kW;
-          this.sim_dist_l+=Math.abs(simpl*this.kW);
-          this.sim_dist_r+=Math.abs(simpr*this.kW);
-          this.distl+=Math.abs(simpl*this.kW);
-          this.distr+=Math.abs(simpr*this.kW);
-          const dx = dist * Math.cos(radians);
-          const dy = dist * Math.sin(radians);
-          this.yc+=dy;
-          this.xc+=dx;
-          util.target.setXY(this.xc, this.yc);
-          util.target.setDirection(util.target.direction + MathUtil.radToDeg(Math.atan((simpl-simpr)/this.rad)));
+            this._simStepMotorSimulation(util.target, simpl, simpr, {trackDist: true});
           }, this.fps);
         }
         else{
@@ -1365,19 +1339,8 @@ robot_first_draw(util){
                   this.xc=util.target.x;
                   this.yc=util.target.y;
                 this.sim_int = setInterval(() => {
-                 const radians = MathUtil.degToRad(90 - util.target.direction);
-                 let dist = (simpl+simpr)/2*this.kW;
-                 this.sim_dist_l+=Math.abs(simpl*this.kW);
-                 this.sim_dist_r+=Math.abs(simpr*this.kW);
-                 this.distl+=Math.abs(simpl*this.kW);
-                 this.distr+=Math.abs(simpr*this.kW);
-                 const dx = dist * Math.cos(radians);
-                 const dy = dist * Math.sin(radians);
-                 this.yc+=dy;
-                 this.xc+=dx;
-                 util.target.setXY(this.xc, this.yc);
-                 util.target.setDirection(util.target.direction + MathUtil.radToDeg(Math.atan((simpl-simpr)/this.rad)));
-                  }, this.fps);
+                  this._simStepMotorSimulation(util.target, simpl, simpr, {trackDist: true});
+                }, this.fps);
               }
               else{
               this.runtime.RCA.setRobotPowerAndStepLimits(power_left,power_right, util.stackFrame.steps ,0);
