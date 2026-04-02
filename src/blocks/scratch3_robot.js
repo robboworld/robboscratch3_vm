@@ -82,7 +82,6 @@ class Scratch3RobotBlocks {
         this.runtime.sim_ac=false;
         this.runtime.going=false;
         this.kW=0.01; // шаг движения робота
-        this.fps = 6; // Скорость обработки кадров инверсивно меняется 1000/5 = 200   = 72 клетки  =
         this.rad= 883;// угол поворопа меняет
         this.xc= 0;
         this.yc=0;
@@ -397,7 +396,7 @@ class Scratch3RobotBlocks {
               simTarget.setXY(this.xc, this.yc);
               this.sim_int = setInterval(() => {
                 this._simStepMotorSimulation(simTarget, this.sim_pl, this.sim_pr, {trackDist: false});
-              }, this.fps);
+              }, this.runtime.threadStepIntervalMs);
           }
           else
           {
@@ -432,7 +431,7 @@ class Scratch3RobotBlocks {
       this._simStepMotorSimulation(simTarget, this.sim_pl, this.sim_pr, {trackDist: false});
       this.sim_int = setInterval(() => {
         this._simStepMotorSimulation(simTarget, this.sim_pl, this.sim_pr, {trackDist: false});
-      }, this.fps);
+      }, this.runtime.threadStepIntervalMs);
   }
   else{
       let power_left = this.power_left;
@@ -1148,7 +1147,7 @@ robot_first_draw(util){
             this.distr=0;
             this.sim_int = setInterval(() => {
               this._simStepMotorSimulation(simTarget, this.sim_pl, this.sim_pr, {trackDist: true});
-            }, this.fps);
+            }, this.runtime.threadStepIntervalMs);
           }
           else {
             this.runtime.RCA.setRobotPowerAndStepLimits(this.power_left,this.power_right,util.stackFrame.steps,0);
@@ -1235,7 +1234,7 @@ robot_first_draw(util){
           this.yc=util.target.y;
           this.sim_int = setInterval(() => {
             this._simStepMotorSimulation(util.target, simpl, simpr, {trackDist: true});
-          }, this.fps);
+          }, this.runtime.threadStepIntervalMs);
         }
         else{
         this.runtime.RCA.setRobotPowerAndStepLimits(power_left,power_right, util.stackFrame.steps ,0);
@@ -1340,7 +1339,7 @@ robot_first_draw(util){
                   this.yc=util.target.y;
                 this.sim_int = setInterval(() => {
                   this._simStepMotorSimulation(util.target, simpl, simpr, {trackDist: true});
-                }, this.fps);
+                }, this.runtime.threadStepIntervalMs);
               }
               else{
               this.runtime.RCA.setRobotPowerAndStepLimits(power_left,power_right, util.stackFrame.steps ,0);

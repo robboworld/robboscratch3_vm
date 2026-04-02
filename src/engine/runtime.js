@@ -318,6 +318,12 @@ class Runtime extends EventEmitter {
         this.compatibilityMode = false;
 
         /**
+         * User-configurable VM thread step interval in ms (clamped 1–10 via setThreadStepIntervalMs).
+         * @type {number}
+         */
+        this.threadStepIntervalMs = Runtime.THREAD_STEP_INTERVAL;
+
+        /**
          * A reference to the current runtime stepping interval, set
          * by a `setInterval`.
          * @type {!number}
@@ -1898,6 +1904,24 @@ class Runtime extends EventEmitter {
     }
 
     /**
+     * Set VM thread step interval in ms (1–10). Invalid values fall back to THREAD_STEP_INTERVAL.
+     * Restarts the stepping timer if the runtime is already running.
+     * @param {number} ms Interval in milliseconds.
+     */
+    setThreadStepIntervalMs (ms) {
+        const rounded = Math.round(Number(ms));
+        const clamped = (Number.isFinite(rounded) && rounded >= 1 && rounded <= 10) ?
+            rounded :
+            Runtime.THREAD_STEP_INTERVAL;
+        this.threadStepIntervalMs = clamped;
+        if (this._steppingInterval) {
+            clearInterval(this._steppingInterval);
+            this._steppingInterval = null;
+            this.start();
+        }
+    }
+
+    /**
      * Emit glows/glow clears for scripts after a single tick.
      * Looks at `this.threads` and notices which have turned on/off new glows.
      * @param {Array.<Thread>=} optExtraThreads Optional list of inactive threads.
@@ -2322,10 +2346,7 @@ class Runtime extends EventEmitter {
         // Do not start if we are already running
         if (this._steppingInterval) return;
 
-        let interval = Runtime.THREAD_STEP_INTERVAL;
-        if (this.compatibilityMode) {
-            interval = Runtime.THREAD_STEP_INTERVAL_COMPATIBILITY;
-        }
+        const interval = this.threadStepIntervalMs;
         this.currentStepTime = interval;
         this._steppingInterval = setInterval(() => {
             this._step();
