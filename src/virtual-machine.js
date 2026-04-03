@@ -21,6 +21,7 @@ const newBlockIds = require('./util/new-block-ids');
 const {loadCostume} = require('./import/load-costume.js');
 const {loadSound} = require('./import/load-sound.js');
 const {serializeSounds, serializeCostumes} = require('./serialization/serialize-assets');
+const robboSimulatorProjectMeta = require('./robbo/robbo-simulator-project-meta');
 require('canvas-toBlob');
 
 const {RobotControlAPI} =  require ('Robboscratch3_DeviceControlAPI');
@@ -177,6 +178,15 @@ class VirtualMachine extends EventEmitter {
         this.monitorBlockListener = this.monitorBlockListener.bind(this);
         this.variableListener = this.variableListener.bind(this);
 
+        /** @type {Array<Function>} */
+        this._rendererReadyWaiters = [];
+        this._allowProjectLoadWithoutRenderer = false;
+        /** @type {object|null} */
+        this._pendingRobboSimulatorMeta = null;
+        /** @type {Function|null} */
+        this._robboSimulatorSaveContextGetter = null;
+        /** @type {Function|null} */
+        this._robboSimulationSpriteJsonProvider = null;
     }
 
     getRCA(){
@@ -357,6 +367,160 @@ class VirtualMachine extends EventEmitter {
     }
 
     /**
+     * GUI registers a getter returning { simEnabled, extensionPackActivated, sensors } for SB3 meta.
+     * @param {?function(): object} getter
+     */
+    setRobboSimulatorSaveContextGetter (getter) {
+        this._robboSimulatorSaveContextGetter = typeof getter === 'function' ? getter : null;
+    }
+
+    /**
+     * GUI registers provider for default simulation robot sprite JSON (library entry).
+     * @param {?function(): object} provider
+     */
+    setRobboSimulationSpriteJsonProvider (provider) {
+        this._robboSimulationSpriteJsonProvider = typeof provider === 'function' ? provider : null;
+    }
+
+    /**
+     * When WebGL is unavailable, allow loadProject to proceed without attachRenderer.
+     * @param {boolean} allow
+     */
+    setAllowProjectLoadWithoutRenderer (allow) {
+        this._allowProjectLoadWithoutRenderer = !!allow;
+        this._flushRendererReadyWaiters();
+    }
+
+    _flushRendererReadyWaiters () {
+        if (!this._rendererReadyWaiters.length) return;
+        const waiters = this._rendererReadyWaiters.splice(0);
+        waiters.forEach(fn => {
+            try {
+                fn();
+            } catch (e) {
+                log.error(e);
+            }
+        });
+    }
+
+    /**
+     * Resolve when runtime.renderer exists, load without renderer is allowed, or not in browser.
+     * @returns {!Promise}
+     */
+    _whenRendererReady () {
+        if (typeof window === 'undefined') {
+            return Promise.resolve();
+        }
+        if (this.runtime.renderer) {
+            return Promise.resolve();
+        }
+        if (this._allowProjectLoadWithoutRenderer) {
+            return Promise.resolve();
+        }
+        return new Promise(resolve => {
+            this._rendererReadyWaiters.push(resolve);
+        });
+    }
+
+    _hasSimulationRobotSprite () {
+        if (!this.runtime || !this.runtime.targets) return false;
+        const names = ['Robbo Robot', 'RobboPlatform', 'Robot'];
+        return this.runtime.targets.some(t =>
+            t.isOriginal && !t.isStage && names.includes(t.sprite.name)
+        );
+    }
+
+    /**
+     * Serialize runtime to project JSON object (before stringify), including meta.robboSimulator.
+     * @returns {object}
+     */
+    serializeProject () {
+        const obj = sb3.serialize(this.runtime);
+        let metaBlock = null;
+        const getter = this._robboSimulatorSaveContextGetter;
+        if (getter) {
+            try {
+                const ctx = getter();
+                if (ctx) {
+                    metaBlock = robboSimulatorProjectMeta.buildRobboSimulatorMetaForSave({
+                        simEnabled: ctx.simEnabled !== undefined ? !!ctx.simEnabled : !!this.runtime.sim_ac,
+                        extensionPackActivated: !!ctx.extensionPackActivated,
+                        sensors: ctx.sensors
+                    });
+                }
+            } catch (e) {
+                log.warn('Robbo simulator save context failed', e);
+            }
+        }
+        if (!metaBlock) {
+            metaBlock = robboSimulatorProjectMeta.buildRobboSimulatorMetaForSave({
+                simEnabled: !!this.runtime.sim_ac,
+                extensionPackActivated: false,
+                sensors: []
+            });
+        }
+        robboSimulatorProjectMeta.mergeRobboSimulatorMetaIntoProjectJson(obj, metaBlock);
+        return obj;
+    }
+
+    _applyPendingRobboSimulatorMeta () {
+        const parsed = robboSimulatorProjectMeta.parseRobboSimulatorMeta(this._pendingRobboSimulatorMeta);
+        this._pendingRobboSimulatorMeta = null;
+        if (!parsed) {
+            return Promise.resolve();
+        }
+
+        this.runtime.sim_ac = parsed.simEnabled;
+
+        const applyRcaAndEmit = () => {
+            for (let i = 0; i < robboSimulatorProjectMeta.SLOT_COUNT; i++) {
+                const slot = parsed.sensors[i];
+                this.RCA.setRobotSensor(0, i, slot.sensor_name);
+            }
+            if (typeof this.setUTIL === 'function') {
+                this.setUTIL();
+            }
+            this.emit(VirtualMachine.ROBBO_SIMULATOR_PROJECT_META_APPLIED, {
+                simEnabled: parsed.simEnabled,
+                extensionPackActivated: parsed.extensionPackActivated,
+                sensors: parsed.sensors
+            });
+        };
+
+        const needSprite = parsed.simEnabled && !this._hasSimulationRobotSprite();
+        if (!needSprite) {
+            applyRcaAndEmit();
+            return Promise.resolve();
+        }
+        const getJson = this._robboSimulationSpriteJsonProvider;
+        if (!getJson) {
+            log.warn('Robbo simulator: sim on but no sprite JSON provider registered');
+            applyRcaAndEmit();
+            return Promise.resolve();
+        }
+        let spriteJson;
+        try {
+            spriteJson = getJson();
+        } catch (e) {
+            log.warn('Robbo simulator: sprite provider failed', e);
+            applyRcaAndEmit();
+            return Promise.resolve();
+        }
+        if (!spriteJson) {
+            applyRcaAndEmit();
+            return Promise.resolve();
+        }
+        return this.addSprite(spriteJson)
+            .then(() => {
+                applyRcaAndEmit();
+            })
+            .catch(err => {
+                log.error('Robbo simulator: addSprite failed', err);
+                applyRcaAndEmit();
+            });
+    }
+
+    /**
      * Load a Scratch project from a .sb, .sb2, .sb3 or json string.
      * @param {string | object} input A json string, object, or ArrayBuffer representing the project to load.
      * @return {!Promise} Promise that resolves after targets are installed.
@@ -384,7 +548,8 @@ class VirtualMachine extends EventEmitter {
             return Promise.resolve();
         };
 
-        const validationPromise = prepareSb3Repair()
+        const validationPromise = this._whenRendererReady()
+            .then(() => prepareSb3Repair())
             .then(() => new Promise((resolve, reject) => {
             // The second argument of false below indicates to the validator that the
             // input should be parsed/validated as an entire project (and not a single sprite)
@@ -475,7 +640,7 @@ class VirtualMachine extends EventEmitter {
     saveProjectSb3_auto () {
         const soundDescs = serializeSounds(this.runtime);
         const costumeDescs = serializeCostumes(this.runtime);
-        const serializedProject = sb3.serialize(this.runtime);
+        const serializedProject = this.serializeProject();
 
         if (typeof serializedProject.targets === 'undefined') {
             return Promise.reject(new Error('Project targets undefined'));
@@ -549,7 +714,7 @@ class VirtualMachine extends EventEmitter {
      * @return {string} Serialized state of the runtime.
      */
     toJSON () {
-        return StringUtil.stringify(sb3.serialize(this.runtime));
+        return StringUtil.stringify(this.serializeProject());
     }
 
     // TODO do we still need this function? Keeping it here so as not to introduce
@@ -571,6 +736,17 @@ class VirtualMachine extends EventEmitter {
      * @returns {Promise} Promise that resolves after the project has loaded
      */
     deserializeProject (projectJSON, zip) {
+        this._pendingRobboSimulatorMeta = (() => {
+            const raw = robboSimulatorProjectMeta.extractRawRobboSimulatorMeta(projectJSON);
+            if (!raw) return null;
+            try {
+                return JSON.parse(JSON.stringify(raw));
+            } catch (e) {
+                log.warn('robboSimulator: failed to clone meta', e);
+                return null;
+            }
+        })();
+
         // Clear the current runtime
         this.clear();
 
@@ -587,7 +763,12 @@ class VirtualMachine extends EventEmitter {
         };
         return deserializePromise()
             .then(({targets, extensions}) =>
-                this.installTargets(targets, extensions, true));
+                this.installTargets(targets, extensions, true))
+            .then(() => this._applyPendingRobboSimulatorMeta())
+            .catch(err => {
+                this._pendingRobboSimulatorMeta = null;
+                throw err;
+            });
     }
 
     /**
@@ -1173,6 +1354,7 @@ class VirtualMachine extends EventEmitter {
      */
     attachRenderer (renderer) {
         this.runtime.attachRenderer(renderer);
+        this._flushRendererReadyWaiters();
     }
 
     /**
@@ -1626,5 +1808,11 @@ class VirtualMachine extends EventEmitter {
         return null;
     }
 }
+
+/**
+ * Emitted after SB3 meta.robboSimulator is applied (GUI sync).
+ * @type {string}
+ */
+VirtualMachine.ROBBO_SIMULATOR_PROJECT_META_APPLIED = 'ROBBO_SIMULATOR_PROJECT_META_APPLIED';
 
 module.exports = VirtualMachine;
