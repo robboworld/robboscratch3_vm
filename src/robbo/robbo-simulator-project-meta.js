@@ -86,10 +86,12 @@ const buildRobboSimulatorMetaForSave = opts => {
             sensors[i].sensor_active = false;
         }
     }
+    const copterSimEnabled = !!opts.copterSimEnabled;
     return {
         version: META_VERSION,
         simEnabled,
         extensionPackActivated,
+        copterSimEnabled,
         sensors
     };
 };
@@ -135,6 +137,7 @@ const parseRobboSimulatorMeta = raw => {
     }
     const simEnabled = !!raw.simEnabled;
     const extensionPackActivated = raw.extensionPackActivated === undefined ? false : !!raw.extensionPackActivated;
+    const copterSimEnabled = raw.copterSimEnabled === undefined ? false : !!raw.copterSimEnabled;
     let sensorsRaw = raw.sensors;
     if (!Array.isArray(sensorsRaw)) {
         sensorsRaw = [];
@@ -147,6 +150,7 @@ const parseRobboSimulatorMeta = raw => {
         version: META_VERSION,
         simEnabled,
         extensionPackActivated,
+        copterSimEnabled,
         sensors
     };
 };

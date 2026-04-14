@@ -445,6 +445,7 @@ class VirtualMachine extends EventEmitter {
                     metaBlock = robboSimulatorProjectMeta.buildRobboSimulatorMetaForSave({
                         simEnabled: ctx.simEnabled !== undefined ? !!ctx.simEnabled : !!this.runtime.sim_ac,
                         extensionPackActivated: !!ctx.extensionPackActivated,
+                        copterSimEnabled: ctx.copterSimEnabled !== undefined ? !!ctx.copterSimEnabled : !!this.runtime.sim_copter_ac,
                         sensors: ctx.sensors
                     });
                 }
@@ -456,6 +457,7 @@ class VirtualMachine extends EventEmitter {
             metaBlock = robboSimulatorProjectMeta.buildRobboSimulatorMetaForSave({
                 simEnabled: !!this.runtime.sim_ac,
                 extensionPackActivated: false,
+                copterSimEnabled: !!this.runtime.sim_copter_ac,
                 sensors: []
             });
         }
@@ -471,6 +473,7 @@ class VirtualMachine extends EventEmitter {
         }
 
         this.runtime.sim_ac = parsed.simEnabled;
+        this.runtime.sim_copter_ac = !!parsed.copterSimEnabled;
 
         const applyRcaAndEmit = () => {
             for (let i = 0; i < robboSimulatorProjectMeta.SLOT_COUNT; i++) {
@@ -483,6 +486,7 @@ class VirtualMachine extends EventEmitter {
             this.emit(VirtualMachine.ROBBO_SIMULATOR_PROJECT_META_APPLIED, {
                 simEnabled: parsed.simEnabled,
                 extensionPackActivated: parsed.extensionPackActivated,
+                copterSimEnabled: parsed.copterSimEnabled,
                 sensors: parsed.sensors
             });
         };
