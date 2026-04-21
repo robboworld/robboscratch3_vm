@@ -105,6 +105,7 @@ class Scratch3RobotBlocks {
         this.last_util = {};
         this.start_deg=0;
         this.runtime.on('PROJECT_STOP_ALL', this._onProjectStopAll.bind(this));
+        this.runtime.on('ROBBO_SIM_SPRITES_INVALIDATED', this._onRobboSimSpritesInvalidated.bind(this));
         const simCal = loadSimSensorCalibration();
         this.simSensorProbes = simCal.probes;
         this.simTouchMaxHitDistance = simCal.touchMaxHitDistance;
@@ -143,6 +144,18 @@ class Scratch3RobotBlocks {
     saveSimSensorCalibration(this.simSensorProbes, this.simTouchMaxHitDistance);
     return this.simTouchMaxHitDistance;
   }
+
+    /**
+     * When the robot sim sprite is removed while sim was active, clear intervals like Stop.
+     * @param {Object} payload
+     * @param {boolean} [payload.robot]
+     * @param {boolean} [payload.copter]
+     */
+    _onRobboSimSpritesInvalidated (payload) {
+        if (payload && payload.robot) {
+            this._onProjectStopAll();
+        }
+    }
 
     /**
      * Stop robot motors and clear timers when project is stopped (Stop button).
@@ -252,14 +265,26 @@ class Scratch3RobotBlocks {
 
   getSimTarget (util) {
     if (!this.runtime.sim_ac) return util.target;
-    const robot = this.runtime.targets.find(t => !t.isStage && t.sprite && t.sprite.name === 'Robbo Robot');
-    return robot || util.target;
+    const names = ['Robbo Robot', 'RobboPlatform', 'Robot'];
+    const robot = this.runtime.targets.find(t => !t.isStage && t.sprite && names.includes(t.sprite.name));
+    if (!robot) {
+      this.runtime.sim_ac = false;
+      this.runtime.going = false;
+      clearInterval(this.sim_int);
+      this.sim_int = null;
+      return util.target;
+    }
+    return robot;
   }
 
   getSimSensorDebugData () {
     if (!this.runtime || !this.runtime.sim_ac) return [];
-    const robot = this.runtime.targets.find(t => !t.isStage && t.sprite && t.sprite.name === 'Robbo Robot');
-    if (!robot) return [];
+    const names = ['Robbo Robot', 'RobboPlatform', 'Robot'];
+    const robot = this.runtime.targets.find(t => !t.isStage && t.sprite && names.includes(t.sprite.name));
+    if (!robot) {
+      this.runtime.sim_ac = false;
+      return [];
+    }
     return this.simSensorProbes.map((sensorCfg, idx) => {
       const ray = this.getSimSensorRay({target: robot}, idx);
       const startX = ray.startPoint[0];
@@ -711,6 +736,13 @@ robot_first_draw(util){
     }
 
   robot_set_sens(util,a){
+      if (this.runtime.sim_ac) {
+        const simTarget = this.getSimTarget(util);
+        if (!this.runtime.sim_ac || !simTarget) {
+          return -1;
+        }
+        util = Object.assign({}, util, {target: simTarget});
+      }
       var radians=0,dx=0,dy=0;
       const ray = this.getSimSensorRay(util, a);
       // In simulation the sensor types are selected in GUI and applied to RCA via `setRobotSensor`.

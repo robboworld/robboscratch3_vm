@@ -9,7 +9,14 @@ const SIM_SCALE = 200;       // 1 meter = 200 Scratch pixels
 const SIM_BASE_SIZE = 15;    // sprite size (%) at z=0
 const SIM_SIZE_PER_METER = 12; // +12% per meter of altitude
 const SIM_STEP_MS = 50;      // physics tick interval
-const SIM_MOVE_SPEED = 0.4;  // meters per second for move_to_coord interpolation
+/** Horizontal / default move interpolation (m/s); matches sim `fly time` distance rate. */
+const SIM_MOVE_SPEED = 0.4;
+/** Vertical ascent rate for takeoff (m/s), faster than {@link SIM_LAND_Z_MPS}. */
+const SIM_TAKEOFF_Z_MPS = 0.55;
+/** Descent rate while landing (m/s). */
+const SIM_LAND_Z_MPS = 0.22;
+const SIM_POS_TOLERANCE = 0.004;
+const SIM_YAW_TOLERANCE = 2.5;
 
 class Scratch3QuadcopterBlocks {
     constructor (runtime) {
@@ -50,6 +57,13 @@ class Scratch3QuadcopterBlocks {
           this.sim_battery = 100;
           this.sim_interval = null;
           this.sim_base_size = SIM_BASE_SIZE;
+
+          this.SendCordInterval = null;
+          this.CopterLANDING = null;
+          this._simTimeouts = new Set();
+
+          this.runtime.on('PROJECT_STOP_ALL', this._onProjectStopAll.bind(this));
+          this.runtime.on('ROBBO_SIM_SPRITES_INVALIDATED', this._onRobboSimSpritesInvalidated.bind(this));
     }
 
     getPrimitives () {
@@ -95,12 +109,20 @@ class Scratch3QuadcopterBlocks {
 
     _simApplyState () {
         const target = this._getSimCopterTarget();
-        if (!target) return;
+        if (!target) {
+            if (this.runtime && this.runtime.sim_copter_ac) {
+                this.runtime.sim_copter_ac = false;
+                this._simClearInterval();
+                this._simClearAllTimeouts();
+                this.fack = 0;
+            }
+            return;
+        }
         if (!target.draggable) {
             target.setDraggable(true);
         }
         target.setXY(this.sim_x * SIM_SCALE, this.sim_y * SIM_SCALE);
-        target.setDirection(90 - this.sim_yaw);
+        target.setDirection(this.sim_yaw);
         const sz = this.sim_base_size + this.sim_z * SIM_SIZE_PER_METER;
         target.setSize(sz);
         const costumeIdx = this.sim_is_flying ? COSTUME_FLYING : COSTUME_IDLE;
@@ -125,14 +147,32 @@ class Scratch3QuadcopterBlocks {
     syncFromSpritePosition () {
         if (!this.runtime || !this.runtime.sim_copter_ac) return false;
         const target = this._getSimCopterTarget();
-        if (!target) return false;
+        if (!target) {
+            this.runtime.sim_copter_ac = false;
+            this._simClearInterval();
+            this._simClearAllTimeouts();
+            this.fack = 0;
+            return false;
+        }
+        let changed = false;
         const nextX = Number((target.x / SIM_SCALE).toFixed(3));
         const nextY = Number((target.y / SIM_SCALE).toFixed(3));
-        const changed = Math.abs(nextX - this.sim_x) > 0.0005 || Math.abs(nextY - this.sim_y) > 0.0005;
-        if (!changed) return false;
-        this.sim_x = nextX;
-        this.sim_y = nextY;
-        return true;
+        if (Math.abs(nextX - this.sim_x) > 0.0005 || Math.abs(nextY - this.sim_y) > 0.0005) {
+            this.sim_x = nextX;
+            this.sim_y = nextY;
+            changed = true;
+        }
+        const dir = Number(target.direction);
+        if (Number.isFinite(dir)) {
+            const nextYaw = this._castYawTo360(dir);
+            let dyaw = Math.abs(nextYaw - this.sim_yaw);
+            if (dyaw > 180) dyaw = 360 - dyaw;
+            if (dyaw > 0.05) {
+                this.sim_yaw = nextYaw;
+                changed = true;
+            }
+        }
+        return changed;
     }
 
     setStateFromPaletteInput (nextState) {
@@ -152,6 +192,7 @@ class Scratch3QuadcopterBlocks {
         applyNumber('sim_yaw', value => this._castYawTo360(value));
         if (!changed) return false;
         this._simClearInterval();
+        this._simClearAllTimeouts();
         this._simEnsureFlyingFlagByAltitude();
         this.fack = 0;
         this._simApplyState();
@@ -165,27 +206,91 @@ class Scratch3QuadcopterBlocks {
         }
     }
 
+    _simAddTimeout (fn, ms) {
+        const id = setTimeout(() => {
+            this._simTimeouts.delete(id);
+            fn();
+        }, ms);
+        this._simTimeouts.add(id);
+        return id;
+    }
+
+    _simClearAllTimeouts () {
+        for (const id of this._simTimeouts) {
+            clearTimeout(id);
+        }
+        this._simTimeouts.clear();
+    }
+
+    _onProjectStopAll () {
+        this._simClearInterval();
+        this._simClearAllTimeouts();
+        if (this.SendCordInterval) {
+            clearInterval(this.SendCordInterval);
+            this.SendCordInterval = null;
+        }
+        if (this.CopterLANDING) {
+            clearInterval(this.CopterLANDING);
+            this.CopterLANDING = null;
+        }
+        this.fack = 0;
+    }
+
+    /**
+     * When the copter sim sprite is removed while sim was active, clear sim timers.
+     * @param {Object} payload
+     * @param {boolean} [payload.robot]
+     * @param {boolean} [payload.copter]
+     */
+    _onRobboSimSpritesInvalidated (payload) {
+        if (payload && payload.copter) {
+            this._onProjectStopAll();
+        }
+    }
+
+    /**
+     * @param {object} util
+     * @returns {boolean} true when copter sprite exists (or sim off)
+     */
+    _ensureSimCopterSprite (util) {
+        if (!this.runtime.sim_copter_ac) return true;
+        if (this._getSimCopterTarget()) return true;
+        this.runtime.sim_copter_ac = false;
+        this._simClearInterval();
+        this._simClearAllTimeouts();
+        this.fack = 0;
+        return false;
+    }
+
     /**
      * Animate sim copter toward target coords. Resolves when close enough or timeout.
      * Uses the same fack/yield pattern as the hardware path.
+     * @param {number} tx
+     * @param {number} ty
+     * @param {number} tz
+     * @param {number} tyaw
+     * @param {Object=} opts Optional speed overrides in m/s: xyMps, zMps.
      */
-    _simStartMoveToCoord (tx, ty, tz, tyaw) {
+    _simStartMoveToCoord (tx, ty, tz, tyaw, opts) {
         this._simClearInterval();
+        const xyMps = opts && Number.isFinite(opts.xyMps) ? opts.xyMps : SIM_MOVE_SPEED;
+        const zMps = opts && Number.isFinite(opts.zMps) ? opts.zMps : SIM_MOVE_SPEED;
         this.sim_interval = setInterval(() => {
             const dx = tx - this.sim_x;
             const dy = ty - this.sim_y;
             const dz = tz - this.sim_z;
-            const step = SIM_MOVE_SPEED * (SIM_STEP_MS / 1000);
+            const xyStep = xyMps * (SIM_STEP_MS / 1000);
+            const zStep = zMps * (SIM_STEP_MS / 1000);
             const dist2d = Math.sqrt(dx * dx + dy * dy);
-            if (dist2d > step) {
-                this.sim_x += (dx / dist2d) * step;
-                this.sim_y += (dy / dist2d) * step;
+            if (dist2d > xyStep) {
+                this.sim_x += (dx / dist2d) * xyStep;
+                this.sim_y += (dy / dist2d) * xyStep;
             } else {
                 this.sim_x = tx;
                 this.sim_y = ty;
             }
-            if (Math.abs(dz) > step) {
-                this.sim_z += Math.sign(dz) * step;
+            if (Math.abs(dz) > zStep) {
+                this.sim_z += Math.sign(dz) * zStep;
             } else {
                 this.sim_z = tz;
             }
@@ -205,14 +310,12 @@ class Scratch3QuadcopterBlocks {
     }
 
     _simIsAtTarget (tx, ty, tz, tyaw) {
-        const posDelta = 0.02;
-        const yawDelta = 3;
         let dyaw = Math.abs(tyaw - this.sim_yaw);
         if (dyaw > 180) dyaw = 360 - dyaw;
-        return Math.abs(this.sim_x - tx) < posDelta &&
-               Math.abs(this.sim_y - ty) < posDelta &&
-               Math.abs(this.sim_z - tz) < posDelta &&
-               dyaw < yawDelta;
+        return Math.abs(this.sim_x - tx) < SIM_POS_TOLERANCE &&
+               Math.abs(this.sim_y - ty) < SIM_POS_TOLERANCE &&
+               Math.abs(this.sim_z - tz) < SIM_POS_TOLERANCE &&
+               dyaw < SIM_YAW_TOLERANCE;
     }
 
     _castYawTo360 (yaw) {
@@ -228,6 +331,7 @@ class Scratch3QuadcopterBlocks {
 
     copter_fly_up (args, util) {
         if (this.runtime.sim_copter_ac) {
+            if (!this._ensureSimCopterSprite(util)) return;
             if (this.fack === 0) {
                 this.syncFromSpritePosition();
                 if (this._simCanExecuteAirCommand()) {
@@ -236,9 +340,11 @@ class Scratch3QuadcopterBlocks {
                 }
             }
             if (this.fack === 0) {
-                this.sim_z = this.sim_z + 0.3;
+                this._sim_target_z = this.sim_z + 0.3;
                 this.sim_is_flying = true;
-                this._simStartMoveToCoord(this.sim_x, this.sim_y, this.sim_z, this.sim_yaw);
+                this._simStartMoveToCoord(this.sim_x, this.sim_y, this._sim_target_z, this.sim_yaw, {
+                    zMps: SIM_TAKEOFF_Z_MPS
+                });
                 this.yielded_time_start = Date.now();
                 this.fack = 1;
                 util.yield();
@@ -247,13 +353,14 @@ class Scratch3QuadcopterBlocks {
                 if ((Date.now() - this.yielded_time_start) >= this.yielded_max_time) {
                     this.fack = 2;
                 }
-                if (this._simIsAtTarget(this.sim_x, this.sim_y, this.sim_z, this.sim_yaw)) {
+                if (this._simIsAtTarget(this.sim_x, this.sim_y, this._sim_target_z, this.sim_yaw)) {
                     this.fack = 2;
                 }
                 util.yield();
                 return;
             }
             this._simClearInterval();
+            this.sim_z = this._sim_target_z;
             this._simApplyState();
             this.fack = 0;
             return;
@@ -298,6 +405,7 @@ class Scratch3QuadcopterBlocks {
 
     copter_land (args, util) {
         if (this.runtime.sim_copter_ac) {
+            if (!this._ensureSimCopterSprite(util)) return;
             if (this.fack === 0) {
                 this.syncFromSpritePosition();
                 if (!this._simCanExecuteAirCommand()) {
@@ -310,7 +418,7 @@ class Scratch3QuadcopterBlocks {
             if (this.fack === 0) {
                 this._simClearInterval();
                 this.sim_interval = setInterval(() => {
-                    this.sim_z -= 0.1 * (SIM_STEP_MS / 200);
+                    this.sim_z -= SIM_LAND_Z_MPS * (SIM_STEP_MS / 1000);
                     if (this.sim_z <= 0.02) {
                         this.sim_z = 0;
                         this.sim_is_flying = false;
@@ -353,6 +461,7 @@ class Scratch3QuadcopterBlocks {
     copter_stop () {
         if (this.runtime.sim_copter_ac) {
             this._simClearInterval();
+            this._simClearAllTimeouts();
             this.sim_is_flying = false;
             this.sim_z = 0;
             this._simApplyState();
@@ -374,6 +483,10 @@ class Scratch3QuadcopterBlocks {
 
     copter_status (args, util) {
         if (this.runtime.sim_copter_ac) {
+            if (!this._getSimCopterTarget()) {
+                this.runtime.sim_copter_ac = false;
+                return false;
+            }
             return true;
         }
         return(this.runtime.QCA.isQuadcopterConnected());
@@ -381,13 +494,14 @@ class Scratch3QuadcopterBlocks {
 
     copter_fly_distance (args, util) {
         if (this.runtime.sim_copter_ac) {
+            if (!this._ensureSimCopterSprite(util)) return;
             if (this.fack === 0) {
                 this.syncFromSpritePosition();
                 if (!this._simCanExecuteAirCommand()) return;
             }
             if (this.fack === 0) {
                 const meters = Number(args.METERS);
-                const rad = (this.sim_yaw + this.dir) * Math.PI / 180;
+                const rad = (90 - (this.sim_yaw + this.dir)) * Math.PI / 180;
                 const tx = this.sim_x + meters * Math.cos(rad);
                 const ty = this.sim_y + meters * Math.sin(rad);
                 this._sim_target_x = tx;
@@ -404,6 +518,8 @@ class Scratch3QuadcopterBlocks {
                 return;
             }
             this._simClearInterval();
+            this.sim_x = this._sim_target_x;
+            this.sim_y = this._sim_target_y;
             this._simApplyState();
             this.fack = 0;
             return;
@@ -455,13 +571,15 @@ class Scratch3QuadcopterBlocks {
 
     copter_fly_time (args, util) {
         if (this.runtime.sim_copter_ac) {
+            if (!this._ensureSimCopterSprite(util)) return;
             if (this.fack === 0) {
                 this.syncFromSpritePosition();
                 if (!this._simCanExecuteAirCommand()) return;
             }
             if (this.fack === 0) {
-                const vx = this.speed * Math.cos((this.sim_yaw + this.dir) * Math.PI / 180);
-                const vy = this.speed * Math.sin((this.sim_yaw + this.dir) * Math.PI / 180);
+                const headingRad = (90 - (this.sim_yaw + this.dir)) * Math.PI / 180;
+                const vx = SIM_MOVE_SPEED * Math.cos(headingRad);
+                const vy = SIM_MOVE_SPEED * Math.sin(headingRad);
                 this._simClearInterval();
                 this.sim_interval = setInterval(() => {
                     this.sim_x += vx * (SIM_STEP_MS / 1000);
@@ -470,7 +588,9 @@ class Scratch3QuadcopterBlocks {
                 }, SIM_STEP_MS);
                 this.fack = 1;
                 const time_to_fly = Number(args.SECONDS) * 1000;
-                setTimeout(() => { this.fack = 2; }, time_to_fly);
+                this._simAddTimeout(() => {
+                    this.fack = 2;
+                }, time_to_fly);
                 util.yield();
                 return;
             } else if (this.fack !== 2) {
@@ -508,6 +628,7 @@ class Scratch3QuadcopterBlocks {
 
     copter_fly_for_time_with_speed (args, util) {
         if (this.runtime.sim_copter_ac) {
+            if (!this._ensureSimCopterSprite(util)) return;
             if (this.fack === 0) {
                 this.syncFromSpritePosition();
                 if (!this._simCanExecuteAirCommand()) return;
@@ -523,7 +644,9 @@ class Scratch3QuadcopterBlocks {
                 }, SIM_STEP_MS);
                 this.fack = 1;
                 const time_to_fly = Number(args.SECONDS) * 1000;
-                setTimeout(() => { this.fack = 2; }, time_to_fly);
+                this._simAddTimeout(() => {
+                    this.fack = 2;
+                }, time_to_fly);
                 util.yield();
                 return;
             } else if (this.fack !== 2) {
@@ -560,6 +683,7 @@ class Scratch3QuadcopterBlocks {
 
     copter_change_x_by (args, util) {
         if (this.runtime.sim_copter_ac) {
+            if (!this._ensureSimCopterSprite(util)) return;
             if (this.fack === 0) {
                 this.syncFromSpritePosition();
                 if (!this._simCanExecuteAirCommand()) return;
@@ -579,6 +703,7 @@ class Scratch3QuadcopterBlocks {
                 return;
             }
             this._simClearInterval();
+            this.sim_x = this._sim_target_x;
             this._simApplyState();
             this.fack = 0;
             return;
@@ -624,6 +749,7 @@ class Scratch3QuadcopterBlocks {
 
     copter_change_y_by (args, util) {
         if (this.runtime.sim_copter_ac) {
+            if (!this._ensureSimCopterSprite(util)) return;
             if (this.fack === 0) {
                 this.syncFromSpritePosition();
                 if (!this._simCanExecuteAirCommand()) return;
@@ -643,6 +769,7 @@ class Scratch3QuadcopterBlocks {
                 return;
             }
             this._simClearInterval();
+            this.sim_y = this._sim_target_y;
             this._simApplyState();
             this.fack = 0;
             return;
@@ -686,6 +813,7 @@ class Scratch3QuadcopterBlocks {
 
     copter_change_z_by (args, util) {
         if (this.runtime.sim_copter_ac) {
+            if (!this._ensureSimCopterSprite(util)) return;
             if (this.fack === 0) {
                 this.syncFromSpritePosition();
                 if (!this._simCanExecuteAirCommand()) return;
@@ -706,6 +834,7 @@ class Scratch3QuadcopterBlocks {
                 return;
             }
             this._simClearInterval();
+            this.sim_z = this._sim_target_z;
             this._simApplyState();
             this.fack = 0;
             return;
@@ -776,6 +905,7 @@ class Scratch3QuadcopterBlocks {
 
     copter_fly_for_seconds_to_coords (args, util) {
         if (this.runtime.sim_copter_ac) {
+            if (!this._ensureSimCopterSprite(util)) return;
             if (this.fack === 0) {
                 this.syncFromSpritePosition();
                 if (!this._simCanExecuteAirCommand()) return;
@@ -788,6 +918,9 @@ class Scratch3QuadcopterBlocks {
                 const vx = seconds > 0 ? (tx - this.sim_x) / seconds : 0;
                 const vy = seconds > 0 ? (ty - this.sim_y) / seconds : 0;
                 const vz = seconds > 0 ? (tz - this.sim_z) / seconds : 0;
+                this._sim_flySecondsEndX = tx;
+                this._sim_flySecondsEndY = ty;
+                this._sim_flySecondsEndZ = tz;
                 this._simClearInterval();
                 this.sim_interval = setInterval(() => {
                     this.sim_x += vx * (SIM_STEP_MS / 1000);
@@ -796,7 +929,9 @@ class Scratch3QuadcopterBlocks {
                     this._simApplyState();
                 }, SIM_STEP_MS);
                 this.fack = 1;
-                setTimeout(() => { this.fack = 2; }, seconds * 1000);
+                this._simAddTimeout(() => {
+                    this.fack = 2;
+                }, seconds * 1000);
                 util.yield();
                 return;
             } else if (this.fack !== 2) {
@@ -804,6 +939,9 @@ class Scratch3QuadcopterBlocks {
                 return;
             }
             this._simClearInterval();
+            this.sim_x = this._sim_flySecondsEndX;
+            this.sim_y = this._sim_flySecondsEndY;
+            this.sim_z = this._sim_flySecondsEndZ;
             this._simApplyState();
             this.fack = 0;
             return;
@@ -836,6 +974,7 @@ class Scratch3QuadcopterBlocks {
 
     copter_fly_to_coords (args, util) {
         if (this.runtime.sim_copter_ac) {
+            if (!this._ensureSimCopterSprite(util)) return;
             if (this.fack === 0) {
                 this.syncFromSpritePosition();
                 if (!this._simCanExecuteAirCommand()) return;
@@ -856,6 +995,9 @@ class Scratch3QuadcopterBlocks {
                 return;
             }
             this._simClearInterval();
+            this.sim_x = this._sim_target_x;
+            this.sim_y = this._sim_target_y;
+            this.sim_z = this._sim_target_z;
             this._simApplyState();
             this.fack = 0;
             return;
@@ -919,6 +1061,7 @@ class Scratch3QuadcopterBlocks {
 
     copter_rotate (args, util) {
         if (this.runtime.sim_copter_ac) {
+            if (!this._ensureSimCopterSprite(util)) return;
             if (this.fack === 0) {
                 this.syncFromSpritePosition();
                 if (!this._simCanExecuteAirCommand()) return;
@@ -937,6 +1080,7 @@ class Scratch3QuadcopterBlocks {
                 return;
             }
             this._simClearInterval();
+            this.sim_yaw = this._sim_target_yaw;
             this._simApplyState();
             this.fack = 0;
             return;

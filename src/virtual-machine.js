@@ -89,6 +89,10 @@ class VirtualMachine extends EventEmitter {
         this.runtime.going=false;
         this.runtime.util={};
         /**
+         * @returns {!Promise}
+         */
+        this.runtime.ensureCopterSimulationSprite = () => this.ensureCopterSimulationSprite();
+        /**
          * The currently dragging target, for redirecting IO data.
          * @type {Target}
          */
@@ -187,6 +191,8 @@ class VirtualMachine extends EventEmitter {
         this._robboSimulatorSaveContextGetter = null;
         /** @type {Function|null} */
         this._robboSimulationSpriteJsonProvider = null;
+        /** @type {Function|null} */
+        this._copterSimSpriteJsonProvider = null;
     }
 
     getRCA(){
@@ -383,6 +389,14 @@ class VirtualMachine extends EventEmitter {
     }
 
     /**
+     * GUI registers provider for default simulation quadcopter sprite JSON.
+     * @param {?function(): object} provider
+     */
+    setCopterSimulationSpriteJsonProvider (provider) {
+        this._copterSimSpriteJsonProvider = typeof provider === 'function' ? provider : null;
+    }
+
+    /**
      * When WebGL is unavailable, allow loadProject to proceed without attachRenderer.
      * @param {boolean} allow
      */
@@ -430,6 +444,81 @@ class VirtualMachine extends EventEmitter {
         );
     }
 
+    _hasSimulationCopterSprite () {
+        if (!this.runtime || !this.runtime.targets) return false;
+        return this.runtime.targets.some(t =>
+            t.isOriginal && !t.isStage && t.sprite && t.sprite.name === 'Robbo Quadcopter'
+        );
+    }
+
+    /**
+     * Add default copter sim sprite if missing (idempotent).
+     * @returns {!Promise}
+     */
+    ensureCopterSimulationSprite () {
+        return this._whenRendererReady().then(() => {
+            if (this._hasSimulationCopterSprite()) {
+                return Promise.resolve();
+            }
+            const getJson = this._copterSimSpriteJsonProvider;
+            if (!getJson) {
+                log.warn('Robbo simulator: copter sim sprite missing and no copter sprite provider');
+                return Promise.resolve();
+            }
+            let spriteJson;
+            try {
+                spriteJson = getJson();
+            } catch (e) {
+                log.warn('Robbo simulator: copter sprite provider failed', e);
+                return Promise.resolve();
+            }
+            if (!spriteJson) {
+                return Promise.resolve();
+            }
+            return this.addSprite(spriteJson);
+        });
+    }
+
+    /**
+     * Persisted copter sim pose for SB3 meta (meters / degrees).
+     * @returns {object|null}
+     */
+    getCopterSimulatorPersistState () {
+        const b = this.runtime._copterSimBlocks;
+        if (!this.runtime.sim_copter_ac || !b) {
+            return null;
+        }
+        const round = (v, n) => {
+            const p = 10 ** n;
+            return Math.round(v * p) / p;
+        };
+        return {
+            x: round(b.sim_x, 4),
+            y: round(b.sim_y, 4),
+            z: round(b.sim_z, 4),
+            yaw: round(b._castYawTo360(b.sim_yaw), 2)
+        };
+    }
+
+    _applyCopterSimulatorPersistState (state) {
+        if (!state || typeof state !== 'object') {
+            return;
+        }
+        const b = this.runtime._copterSimBlocks;
+        if (!b || !this.runtime.sim_copter_ac) {
+            return;
+        }
+        if (Number.isFinite(state.x)) b.sim_x = state.x;
+        if (Number.isFinite(state.y)) b.sim_y = state.y;
+        if (Number.isFinite(state.z)) b.sim_z = Math.max(0, state.z);
+        if (Number.isFinite(state.yaw)) b.sim_yaw = b._castYawTo360(state.yaw);
+        b.fack = 0;
+        b._simClearInterval();
+        b._simClearAllTimeouts();
+        b._simEnsureFlyingFlagByAltitude();
+        b._simApplyState();
+    }
+
     /**
      * Serialize runtime to project JSON object (before stringify), including meta.robboSimulator.
      * @returns {object}
@@ -437,6 +526,7 @@ class VirtualMachine extends EventEmitter {
     serializeProject () {
         const obj = sb3.serialize(this.runtime);
         let metaBlock = null;
+        const copterSimState = this.getCopterSimulatorPersistState();
         const getter = this._robboSimulatorSaveContextGetter;
         if (getter) {
             try {
@@ -446,7 +536,8 @@ class VirtualMachine extends EventEmitter {
                         simEnabled: ctx.simEnabled !== undefined ? !!ctx.simEnabled : !!this.runtime.sim_ac,
                         extensionPackActivated: !!ctx.extensionPackActivated,
                         copterSimEnabled: ctx.copterSimEnabled !== undefined ? !!ctx.copterSimEnabled : !!this.runtime.sim_copter_ac,
-                        sensors: ctx.sensors
+                        sensors: ctx.sensors,
+                        copterSimState: copterSimState || undefined
                     });
                 }
             } catch (e) {
@@ -458,7 +549,8 @@ class VirtualMachine extends EventEmitter {
                 simEnabled: !!this.runtime.sim_ac,
                 extensionPackActivated: false,
                 copterSimEnabled: !!this.runtime.sim_copter_ac,
-                sensors: []
+                sensors: [],
+                copterSimState: copterSimState || undefined
             });
         }
         robboSimulatorProjectMeta.mergeRobboSimulatorMetaIntoProjectJson(obj, metaBlock);
@@ -472,8 +564,17 @@ class VirtualMachine extends EventEmitter {
             return Promise.resolve();
         }
 
-        this.runtime.sim_ac = parsed.simEnabled;
-        this.runtime.sim_copter_ac = !!parsed.copterSimEnabled;
+        const resolvedSimEnabled = parsed.simEnabled && this._hasSimulationRobotSprite();
+        const resolvedCopterSimEnabled = !!parsed.copterSimEnabled && this._hasSimulationCopterSprite();
+        if (parsed.simEnabled && !resolvedSimEnabled) {
+            log.warn('Robbo simulator: robot sim disabled because simulation sprite is missing');
+        }
+        if (parsed.copterSimEnabled && !resolvedCopterSimEnabled) {
+            log.warn('Robbo simulator: copter sim disabled because simulation sprite is missing');
+        }
+
+        this.runtime.sim_ac = resolvedSimEnabled;
+        this.runtime.sim_copter_ac = resolvedCopterSimEnabled;
 
         const applyRcaAndEmit = () => {
             for (let i = 0; i < robboSimulatorProjectMeta.SLOT_COUNT; i++) {
@@ -483,45 +584,18 @@ class VirtualMachine extends EventEmitter {
             if (typeof this.setUTIL === 'function') {
                 this.setUTIL();
             }
+            if (resolvedCopterSimEnabled) {
+                this._applyCopterSimulatorPersistState(parsed.copterSimState);
+            }
             this.emit(VirtualMachine.ROBBO_SIMULATOR_PROJECT_META_APPLIED, {
-                simEnabled: parsed.simEnabled,
+                simEnabled: resolvedSimEnabled,
                 extensionPackActivated: parsed.extensionPackActivated,
-                copterSimEnabled: parsed.copterSimEnabled,
+                copterSimEnabled: resolvedCopterSimEnabled,
                 sensors: parsed.sensors
             });
         };
-
-        const needSprite = parsed.simEnabled && !this._hasSimulationRobotSprite();
-        if (!needSprite) {
-            applyRcaAndEmit();
-            return Promise.resolve();
-        }
-        const getJson = this._robboSimulationSpriteJsonProvider;
-        if (!getJson) {
-            log.warn('Robbo simulator: sim on but no sprite JSON provider registered');
-            applyRcaAndEmit();
-            return Promise.resolve();
-        }
-        let spriteJson;
-        try {
-            spriteJson = getJson();
-        } catch (e) {
-            log.warn('Robbo simulator: sprite provider failed', e);
-            applyRcaAndEmit();
-            return Promise.resolve();
-        }
-        if (!spriteJson) {
-            applyRcaAndEmit();
-            return Promise.resolve();
-        }
-        return this.addSprite(spriteJson)
-            .then(() => {
-                applyRcaAndEmit();
-            })
-            .catch(err => {
-                log.error('Robbo simulator: addSprite failed', err);
-                applyRcaAndEmit();
-            });
+        applyRcaAndEmit();
+        return Promise.resolve();
     }
 
     /**
@@ -1583,6 +1657,26 @@ class VirtualMachine extends EventEmitter {
      */
     emitTargetsUpdate (triggerProjectChange) {
         if (typeof triggerProjectChange === 'undefined') triggerProjectChange = true;
+        const hasRobot = this._hasSimulationRobotSprite();
+        const hasCopter = this._hasSimulationCopterSprite();
+        const robotMismatch = !!this.runtime.sim_ac && !hasRobot;
+        const copterMismatch = !!this.runtime.sim_copter_ac && !hasCopter;
+        if (robotMismatch || copterMismatch) {
+            if (robotMismatch) {
+                this.runtime.sim_ac = false;
+            }
+            if (copterMismatch) {
+                this.runtime.sim_copter_ac = false;
+            }
+            this.runtime.emit('ROBBO_SIM_SPRITES_INVALIDATED', {
+                robot: robotMismatch,
+                copter: copterMismatch
+            });
+            this.emit(VirtualMachine.ROBBO_SIMULATOR_SPRITES_MISSING, {
+                robotSimOff: robotMismatch,
+                copterSimOff: copterMismatch
+            });
+        }
         this.emit('targetsUpdate', {
             // [[target id, human readable target name], ...].
             targetList: this.runtime.targets
@@ -1818,5 +1912,11 @@ class VirtualMachine extends EventEmitter {
  * @type {string}
  */
 VirtualMachine.ROBBO_SIMULATOR_PROJECT_META_APPLIED = 'ROBBO_SIMULATOR_PROJECT_META_APPLIED';
+
+/**
+ * Emitted when a simulation sprite is deleted while sim flags were on (GUI must sync toggles).
+ * @type {string}
+ */
+VirtualMachine.ROBBO_SIMULATOR_SPRITES_MISSING = 'ROBBO_SIMULATOR_SPRITES_MISSING';
 
 module.exports = VirtualMachine;

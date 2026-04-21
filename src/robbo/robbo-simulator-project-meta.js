@@ -87,13 +87,24 @@ const buildRobboSimulatorMetaForSave = opts => {
         }
     }
     const copterSimEnabled = !!opts.copterSimEnabled;
-    return {
+    const out = {
         version: META_VERSION,
         simEnabled,
         extensionPackActivated,
         copterSimEnabled,
         sensors
     };
+    const cs = opts.copterSimState;
+    if (cs && typeof cs === 'object' && Number.isFinite(cs.x) && Number.isFinite(cs.y) &&
+        Number.isFinite(cs.z) && Number.isFinite(cs.yaw)) {
+        out.copterSimState = {
+            x: cs.x,
+            y: cs.y,
+            z: cs.z,
+            yaw: cs.yaw
+        };
+    }
+    return out;
 };
 
 /**
@@ -146,12 +157,24 @@ const parseRobboSimulatorMeta = raw => {
     for (let i = 0; i < SLOT_COUNT; i++) {
         sensors.push(normalizeSavedSlot(sensorsRaw[i]));
     }
+    let copterSimState = null;
+    const rawCs = raw.copterSimState;
+    if (rawCs && typeof rawCs === 'object') {
+        const x = Number(rawCs.x);
+        const y = Number(rawCs.y);
+        const z = Number(rawCs.z);
+        const yaw = Number(rawCs.yaw);
+        if (Number.isFinite(x) && Number.isFinite(y) && Number.isFinite(z) && Number.isFinite(yaw)) {
+            copterSimState = {x, y, z, yaw};
+        }
+    }
     return {
         version: META_VERSION,
         simEnabled,
         extensionPackActivated,
         copterSimEnabled,
-        sensors
+        sensors,
+        copterSimState
     };
 };
 
