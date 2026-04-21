@@ -175,6 +175,33 @@ class Scratch3QuadcopterBlocks {
         return changed;
     }
 
+    _isSimMotionActive () {
+        return !!this.sim_interval;
+    }
+
+    _shouldSyncFromSpritePosition () {
+        if (!this.runtime || !this.runtime.sim_copter_ac) return false;
+        const target = this._getSimCopterTarget();
+        if (!target) return false;
+        if (this._isSimMotionActive()) return true;
+        const nextX = Number((target.x / SIM_SCALE).toFixed(3));
+        const nextY = Number((target.y / SIM_SCALE).toFixed(3));
+        if (Math.abs(nextX - this.sim_x) > 0.0005 || Math.abs(nextY - this.sim_y) > 0.0005) {
+            return true;
+        }
+        const dir = Number(target.direction);
+        if (!Number.isFinite(dir)) return false;
+        const nextYaw = this._castYawTo360(dir);
+        let dyaw = Math.abs(nextYaw - this.sim_yaw);
+        if (dyaw > 180) dyaw = 360 - dyaw;
+        return dyaw > 0.05;
+    }
+
+    _syncFromSpritePositionIfNeeded () {
+        if (!this._shouldSyncFromSpritePosition()) return false;
+        return this.syncFromSpritePosition();
+    }
+
     setStateFromPaletteInput (nextState) {
         if (!this.runtime || !this.runtime.sim_copter_ac) return false;
         if (!nextState || typeof nextState !== 'object') return false;
@@ -333,7 +360,7 @@ class Scratch3QuadcopterBlocks {
         if (this.runtime.sim_copter_ac) {
             if (!this._ensureSimCopterSprite(util)) return;
             if (this.fack === 0) {
-                this.syncFromSpritePosition();
+                this._syncFromSpritePositionIfNeeded();
                 if (this._simCanExecuteAirCommand()) {
                     this._simApplyState();
                     return;
@@ -407,7 +434,7 @@ class Scratch3QuadcopterBlocks {
         if (this.runtime.sim_copter_ac) {
             if (!this._ensureSimCopterSprite(util)) return;
             if (this.fack === 0) {
-                this.syncFromSpritePosition();
+                this._syncFromSpritePositionIfNeeded();
                 if (!this._simCanExecuteAirCommand()) {
                     this.sim_z = 0;
                     this.sim_is_flying = false;
@@ -496,7 +523,7 @@ class Scratch3QuadcopterBlocks {
         if (this.runtime.sim_copter_ac) {
             if (!this._ensureSimCopterSprite(util)) return;
             if (this.fack === 0) {
-                this.syncFromSpritePosition();
+                this._syncFromSpritePositionIfNeeded();
                 if (!this._simCanExecuteAirCommand()) return;
             }
             if (this.fack === 0) {
@@ -573,7 +600,7 @@ class Scratch3QuadcopterBlocks {
         if (this.runtime.sim_copter_ac) {
             if (!this._ensureSimCopterSprite(util)) return;
             if (this.fack === 0) {
-                this.syncFromSpritePosition();
+                this._syncFromSpritePositionIfNeeded();
                 if (!this._simCanExecuteAirCommand()) return;
             }
             if (this.fack === 0) {
@@ -630,7 +657,7 @@ class Scratch3QuadcopterBlocks {
         if (this.runtime.sim_copter_ac) {
             if (!this._ensureSimCopterSprite(util)) return;
             if (this.fack === 0) {
-                this.syncFromSpritePosition();
+                this._syncFromSpritePositionIfNeeded();
                 if (!this._simCanExecuteAirCommand()) return;
             }
             if (this.fack === 0) {
@@ -685,7 +712,7 @@ class Scratch3QuadcopterBlocks {
         if (this.runtime.sim_copter_ac) {
             if (!this._ensureSimCopterSprite(util)) return;
             if (this.fack === 0) {
-                this.syncFromSpritePosition();
+                this._syncFromSpritePositionIfNeeded();
                 if (!this._simCanExecuteAirCommand()) return;
             }
             if (this.fack === 0) {
@@ -751,7 +778,7 @@ class Scratch3QuadcopterBlocks {
         if (this.runtime.sim_copter_ac) {
             if (!this._ensureSimCopterSprite(util)) return;
             if (this.fack === 0) {
-                this.syncFromSpritePosition();
+                this._syncFromSpritePositionIfNeeded();
                 if (!this._simCanExecuteAirCommand()) return;
             }
             if (this.fack === 0) {
@@ -815,7 +842,7 @@ class Scratch3QuadcopterBlocks {
         if (this.runtime.sim_copter_ac) {
             if (!this._ensureSimCopterSprite(util)) return;
             if (this.fack === 0) {
-                this.syncFromSpritePosition();
+                this._syncFromSpritePositionIfNeeded();
                 if (!this._simCanExecuteAirCommand()) return;
             }
             if (this.fack === 0) {
@@ -879,7 +906,7 @@ class Scratch3QuadcopterBlocks {
 
     copter_x_coord (args, util) {
         if (this.runtime.sim_copter_ac) {
-            this.syncFromSpritePosition();
+            this._syncFromSpritePositionIfNeeded();
             return Number(this.sim_x.toFixed(3));
         }
         return Number(this.runtime.QCA.telemetry_palette_get_coord("X"));
@@ -887,7 +914,7 @@ class Scratch3QuadcopterBlocks {
 
     copter_y_coord (args, util) {
         if (this.runtime.sim_copter_ac) {
-            this.syncFromSpritePosition();
+            this._syncFromSpritePositionIfNeeded();
             return Number(this.sim_y.toFixed(3));
         }
         return Number(this.runtime.QCA.telemetry_palette_get_coord("Y"));
@@ -907,7 +934,7 @@ class Scratch3QuadcopterBlocks {
         if (this.runtime.sim_copter_ac) {
             if (!this._ensureSimCopterSprite(util)) return;
             if (this.fack === 0) {
-                this.syncFromSpritePosition();
+                this._syncFromSpritePositionIfNeeded();
                 if (!this._simCanExecuteAirCommand()) return;
             }
             if (this.fack === 0) {
@@ -976,7 +1003,7 @@ class Scratch3QuadcopterBlocks {
         if (this.runtime.sim_copter_ac) {
             if (!this._ensureSimCopterSprite(util)) return;
             if (this.fack === 0) {
-                this.syncFromSpritePosition();
+                this._syncFromSpritePositionIfNeeded();
                 if (!this._simCanExecuteAirCommand()) return;
             }
             if (this.fack === 0) {
@@ -1063,7 +1090,7 @@ class Scratch3QuadcopterBlocks {
         if (this.runtime.sim_copter_ac) {
             if (!this._ensureSimCopterSprite(util)) return;
             if (this.fack === 0) {
-                this.syncFromSpritePosition();
+                this._syncFromSpritePositionIfNeeded();
                 if (!this._simCanExecuteAirCommand()) return;
             }
             if (this.fack === 0) {
