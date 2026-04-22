@@ -1661,7 +1661,12 @@ class VirtualMachine extends EventEmitter {
         const hasCopter = this._hasSimulationCopterSprite();
         const robotMismatch = !!this.runtime.sim_ac && !hasRobot;
         const copterMismatch = !!this.runtime.sim_copter_ac && !hasCopter;
-        if (robotMismatch || copterMismatch) {
+        // Only reconcile sim vs sprites when a project is actually present.
+        // After runtime.dispose() in clear(), targets are empty while sim_* flags
+        // may still reflect the previous project; that is not "sprites missing"
+        // and must not sync GUI (would run before editingTarget is restored).
+        const hasLoadedTargets = this.runtime.targets.length > 0;
+        if (hasLoadedTargets && (robotMismatch || copterMismatch)) {
             if (robotMismatch) {
                 this.runtime.sim_ac = false;
             }
