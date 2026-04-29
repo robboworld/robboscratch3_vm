@@ -107,15 +107,19 @@ class Scratch3QuadcopterBlocks {
         return null;
     }
 
+    _disableSimByMissingSprite () {
+        if (!this.runtime || !this.runtime.sim_copter_ac) return;
+        this.runtime.sim_copter_ac = false;
+        this._simClearInterval();
+        this._simClearAllTimeouts();
+        this.fack = 0;
+        this.runtime.emit('ROBBO_SIM_SPRITES_INVALIDATED', {robot: false, copter: true});
+    }
+
     _simApplyState () {
         const target = this._getSimCopterTarget();
         if (!target) {
-            if (this.runtime && this.runtime.sim_copter_ac) {
-                this.runtime.sim_copter_ac = false;
-                this._simClearInterval();
-                this._simClearAllTimeouts();
-                this.fack = 0;
-            }
+            this._disableSimByMissingSprite();
             return;
         }
         if (!target.draggable) {
@@ -148,10 +152,7 @@ class Scratch3QuadcopterBlocks {
         if (!this.runtime || !this.runtime.sim_copter_ac) return false;
         const target = this._getSimCopterTarget();
         if (!target) {
-            this.runtime.sim_copter_ac = false;
-            this._simClearInterval();
-            this._simClearAllTimeouts();
-            this.fack = 0;
+            this._disableSimByMissingSprite();
             return false;
         }
         let changed = false;
@@ -282,10 +283,7 @@ class Scratch3QuadcopterBlocks {
     _ensureSimCopterSprite (util) {
         if (!this.runtime.sim_copter_ac) return true;
         if (this._getSimCopterTarget()) return true;
-        this.runtime.sim_copter_ac = false;
-        this._simClearInterval();
-        this._simClearAllTimeouts();
-        this.fack = 0;
+        this._disableSimByMissingSprite();
         return false;
     }
 
@@ -511,7 +509,7 @@ class Scratch3QuadcopterBlocks {
     copter_status (args, util) {
         if (this.runtime.sim_copter_ac) {
             if (!this._getSimCopterTarget()) {
-                this.runtime.sim_copter_ac = false;
+                this._disableSimByMissingSprite();
                 return false;
             }
             return true;
