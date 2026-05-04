@@ -19,6 +19,16 @@ const SIM_LAND_Z_MPS = 0.22;
 const SIM_POS_TOLERANCE = 0.004;
 const SIM_YAW_TOLERANCE = 2.5;
 
+/**
+ * Полёт по железу: в воздухе используем velocity setpoints + hoverStop (как cflib MotionCommander).
+ * Исключение: пошаговая посадка copter_land — только position setpoints.
+ * @see https://www.bitcraze.io/documentation/repository/crazyflie-firmware/master/functional-areas/sensor-to-control/commanders_setpoints/
+ */
+const HARDWARE_YAW_RATE_DPS = 72;
+/** Ожидание isDone по телеметрии — верхняя граница (секунды полёта редко дольше). */
+const HARDWARE_TARGET_COMMAND_TIMEOUT_MS = 45000;
+const HARDWARE_LONG_TARGET_COMMAND_TIMEOUT_MS = 120000;
+
 class Scratch3QuadcopterBlocks {
     constructor (runtime) {
         /**
@@ -350,6 +360,20 @@ class Scratch3QuadcopterBlocks {
         return yaw;
     }
 
+    _minHardwareSpeed () {
+        return Math.max(Math.abs(Number(this.speed)) || 0, 0.12);
+    }
+
+    _shortestYawDeltaDeg (fromDeg, toDeg) {
+        const from = Number(fromDeg);
+        const to = Number(toDeg);
+        if (!Number.isFinite(from) || !Number.isFinite(to)) return 0;
+        let d = (to - from) % 360;
+        if (d > 180) d -= 360;
+        if (d < -180) d += 360;
+        return d;
+    }
+
     _clearHardwareCommandIntervals () {
         if (this.SendCordInterval) {
             clearInterval(this.SendCordInterval);
@@ -362,8 +386,11 @@ class Scratch3QuadcopterBlocks {
     }
 
     _runHardwareTargetCommand (commandKey, util, opts) {
+        const ceiling = opts.timeoutMs !== undefined
+            ? opts.timeoutMs
+            : HARDWARE_TARGET_COMMAND_TIMEOUT_MS;
         this.commandCoordinator.runTargetCommand(commandKey, util, {
-            timeoutMs: opts.timeoutMs || this.yielded_max_time,
+            timeoutMs: ceiling,
             start: () => {
                 if (typeof opts.prepare === 'function') {
                     opts.prepare();
@@ -402,8 +429,12 @@ class Scratch3QuadcopterBlocks {
                 } else {
                     this.SendCordInterval = null;
                 }
+                const lostOrTimeout = Boolean(timedOut || context.disconnected);
+                if (lostOrTimeout) {
+                    this.runtime.QCA.hoverStop();
+                }
                 if (typeof opts.finish === 'function') {
-                    opts.finish(context, timedOut || context.disconnected);
+                    opts.finish(context, lostOrTimeout);
                 }
             },
             cancel: context => {
@@ -423,8 +454,10 @@ class Scratch3QuadcopterBlocks {
     }
 
     _runHardwareTimedCommand (commandKey, util, opts) {
+        const softCeiling = (opts.durationMs || 0) + 15000;
+        const timeoutMs = opts.timeoutMs !== undefined ? opts.timeoutMs : softCeiling;
         this.commandCoordinator.runTargetCommand(commandKey, util, {
-            timeoutMs: opts.timeoutMs || this.yielded_max_time,
+            timeoutMs,
             start: () => {
                 const context = {
                     durationMs: opts.durationMs,
@@ -499,14 +532,14 @@ class Scratch3QuadcopterBlocks {
             prepare: () => {
                 this.init_start_coordinates();
                 this.z = this.z + 0.3;
-                console.log(`copter_fly_up: ${this.z}`);
             },
             dispatch: () => {
-                this.runtime.QCA.move_to_coord(this.x, this.y, this.z, this.yaw);
+                this.runtime.QCA.move_with_speed(0, 0, 0, this.z);
             },
             isDone: () => Math.abs(Number(this.runtime.QCA.get_coord("Z")) - this.z) < this.delta,
             finish: () => {
                 this.runtime.QCA.hoverStop();
+                this.init_start_coordinates();
             }
         });
     }
@@ -558,6 +591,7 @@ class Scratch3QuadcopterBlocks {
 
         // --- Hardware path ---
         return this._runHardwareTargetCommand('copter_land', util, {
+            timeoutMs: HARDWARE_LONG_TARGET_COMMAND_TIMEOUT_MS,
             intervalMs: 200,
             intervalSlot: 'landing',
             prepare: () => {
@@ -636,25 +670,25 @@ class Scratch3QuadcopterBlocks {
         }
 
         // --- Hardware path ---
-        return this._runHardwareTargetCommand('copter_fly_distance', util, {
-            prepare: () => {
-                this.init_start_coordinates();
-                this.x = this.x + Number(args.METERS) * Math.cos((this.yaw + this.dir) * Math.PI / 180);
-                this.y = this.y + Number(args.METERS) * Math.sin((this.yaw + this.dir) * Math.PI / 180);
-                console.log(`HUUUUIX: ${this.x}`);
-                console.log(`HUUUUIY: ${this.y}`);
-            },
-            dispatch: () => {
-                this.runtime.QCA.move_to_coord(this.x, this.y, this.z, this.yaw);
-            },
-            isDone: () => {
-                this.nowx = Number(this.runtime.QCA.get_coord("X"));
-                this.nowy = Number(this.runtime.QCA.get_coord("Y"));
-                return Math.abs(this.nowx - this.x) < this.delta &&
-                    Math.abs(this.nowy - this.y) < this.delta;
+        this.init_start_coordinates();
+        const meters = Number(args.METERS);
+        const v = this._minHardwareSpeed();
+        const durationMs = Math.abs(meters) < 1e-6
+            ? 1
+            : Math.max(3000, (Math.abs(meters) / v) * 1000);
+        const heading = (this.yaw + this.dir) * Math.PI / 180;
+        const dir = meters >= 0 ? 1 : -1;
+        const vx = dir * v * Math.cos(heading);
+        const vy = dir * v * Math.sin(heading);
+        return this._runHardwareTimedCommand('copter_fly_distance', util, {
+            durationMs,
+            start: () => {
+                this.z = Number(this.runtime.QCA.get_coord("Z"));
+                this.runtime.QCA.move_with_speed(vx, vy, 0, this.z);
             },
             finish: () => {
                 this.runtime.QCA.hoverStop();
+                this.init_start_coordinates();
             }
         });
     }
@@ -697,6 +731,8 @@ class Scratch3QuadcopterBlocks {
         return this._runHardwareTimedCommand('copter_fly_time', util, {
             durationMs: Number(args.SECONDS) * 1000,
             start: () => {
+                this.init_start_coordinates();
+                this.z = Number(this.runtime.QCA.get_coord("Z"));
                 const vx = this.speed * Math.cos((this.yaw + this.dir) * Math.PI / 180);
                 const vy = this.speed * Math.sin((this.yaw + this.dir) * Math.PI / 180);
                 this.runtime.QCA.move_with_speed(vx, vy, 0, this.z);
@@ -705,6 +741,7 @@ class Scratch3QuadcopterBlocks {
                 this.x = this.runtime.QCA.get_coord("X");
                 this.y = this.runtime.QCA.get_coord("Y");
                 this.runtime.QCA.hoverStop();
+                this.init_start_coordinates();
             }
         });
     }
@@ -753,6 +790,7 @@ class Scratch3QuadcopterBlocks {
             },
             finish: () => {
                 this.runtime.QCA.hoverStop();
+                this.init_start_coordinates();
             }
         });
     }
@@ -786,20 +824,22 @@ class Scratch3QuadcopterBlocks {
         }
 
         // --- Hardware path ---
-        return this._runHardwareTargetCommand('copter_change_x_by', util, {
-            prepare: () => {
-                this.init_start_coordinates();
-                this.x = this.x + Number(args.DISTANCE_DELTA);
-            },
-            dispatch: () => {
-                this.runtime.QCA.move_to_coord(this.x, this.y, this.z, this.yaw);
-            },
-            isDone: () => {
-                this.nowx = Number(this.runtime.QCA.get_coord("X"));
-                return Math.abs(this.nowx - this.x) < this.delta;
+        this.init_start_coordinates();
+        const dx = Number(args.DISTANCE_DELTA);
+        const v = this._minHardwareSpeed();
+        const durationMs = Math.abs(dx) < 1e-6
+            ? 1
+            : Math.max(3000, (Math.abs(dx) / v) * 1000);
+        const vx = (dx >= 0 ? 1 : -1) * v;
+        return this._runHardwareTimedCommand('copter_change_x_by', util, {
+            durationMs,
+            start: () => {
+                this.z = Number(this.runtime.QCA.get_coord("Z"));
+                this.runtime.QCA.move_with_speed(vx, 0, 0, this.z);
             },
             finish: () => {
                 this.runtime.QCA.hoverStop();
+                this.init_start_coordinates();
             }
         });
     }
@@ -833,20 +873,22 @@ class Scratch3QuadcopterBlocks {
         }
 
         // --- Hardware path ---
-        return this._runHardwareTargetCommand('copter_change_y_by', util, {
-            prepare: () => {
-                this.init_start_coordinates();
-                this.y = this.y - Number(args.DISTANCE_DELTA);
-            },
-            dispatch: () => {
-                this.runtime.QCA.move_to_coord(this.x, this.y, this.z, this.yaw);
-            },
-            isDone: () => {
-                this.nowy = Number(this.runtime.QCA.get_coord("Y"));
-                return Math.abs(this.nowy - this.y) < this.delta;
+        this.init_start_coordinates();
+        const dy = -Number(args.DISTANCE_DELTA);
+        const v = this._minHardwareSpeed();
+        const durationMs = Math.abs(dy) < 1e-6
+            ? 1
+            : Math.max(3000, (Math.abs(dy) / v) * 1000);
+        const vy = (dy >= 0 ? 1 : -1) * v;
+        return this._runHardwareTimedCommand('copter_change_y_by', util, {
+            durationMs,
+            start: () => {
+                this.z = Number(this.runtime.QCA.get_coord("Z"));
+                this.runtime.QCA.move_with_speed(0, vy, 0, this.z);
             },
             finish: () => {
                 this.runtime.QCA.hoverStop();
+                this.init_start_coordinates();
             }
         });
     }
@@ -885,10 +927,9 @@ class Scratch3QuadcopterBlocks {
             prepare: () => {
                 this.init_start_coordinates();
                 this.z = this.z + Number(args.DISTANCE_DELTA);
-                console.log(`copter_change_z_by: ${this.z}`);
             },
             dispatch: () => {
-                this.runtime.QCA.move_to_coord(this.x, this.y, this.z, this.yaw);
+                this.runtime.QCA.move_with_speed(0, 0, 0, this.z);
             },
             isDone: () => {
                 this.nowz = Number(this.runtime.QCA.get_coord("Z"));
@@ -896,6 +937,7 @@ class Scratch3QuadcopterBlocks {
             },
             finish: () => {
                 this.runtime.QCA.hoverStop();
+                this.init_start_coordinates();
             }
         });
     }
@@ -975,15 +1017,15 @@ class Scratch3QuadcopterBlocks {
             durationMs: Number(args.SECONDS) * 1000,
             start: () => {
                 this.init_start_coordinates();
-                const vx = (Number(args.X_COORD) - this.x) / Number(args.SECONDS);
-                const vy = (Number(args.Y_COORD) - this.y) / Number(args.SECONDS);
-                console.log(`CHLENvx!: ${vx}`);
-                console.log(`CHLENvy!: ${vy}`);
+                const sec = Number(args.SECONDS);
+                const vx = sec > 0 ? (Number(args.X_COORD) - this.x) / sec : 0;
+                const vy = sec > 0 ? (Number(args.Y_COORD) - this.y) / sec : 0;
                 this.z = Number(args.Z_COORD);
                 this.runtime.QCA.move_with_speed(vx, vy, 0, this.z);
             },
             finish: () => {
                 this.runtime.QCA.hoverStop();
+                this.init_start_coordinates();
             }
         });
     }
@@ -1020,28 +1062,56 @@ class Scratch3QuadcopterBlocks {
         }
 
         // --- Hardware path ---
-        return this._runHardwareTargetCommand('copter_fly_to_coords', util, {
-            prepare: () => {
-                this.x_telemetry_delta = this.runtime.QCA.get_x_telemetry_delta();
-                this.y_telemetry_delta = this.runtime.QCA.get_y_telemetry_delta();
-                this.init_start_coordinates();
-                this.x = Number(args.X_COORD) + this.x_telemetry_delta;
-                this.y = (Number(args.Y_COORD) * -1) + this.y_telemetry_delta;
-                this.z = Number(args.Z_COORD);
-            },
-            dispatch: () => {
-                this.runtime.QCA.move_to_coord(this.x, this.y, this.z, this.yaw);
-            },
-            isDone: () => {
-                this.nowx = Number(this.runtime.QCA.get_coord("X"));
-                this.nowy = Number(this.runtime.QCA.get_coord("Y"));
-                this.nowz = Number(this.runtime.QCA.get_coord("Z"));
-                return Math.abs(this.nowx - this.x) < this.delta &&
-                    Math.abs(this.nowy - this.y) < this.delta &&
-                    Math.abs(this.nowz - this.z) < this.delta;
+        this.x_telemetry_delta = this.runtime.QCA.get_x_telemetry_delta();
+        this.y_telemetry_delta = this.runtime.QCA.get_y_telemetry_delta();
+        this.init_start_coordinates();
+        const tx = Number(args.X_COORD) + this.x_telemetry_delta;
+        const ty = (Number(args.Y_COORD) * -1) + this.y_telemetry_delta;
+        const tz = Number(args.Z_COORD);
+        const dx = tx - this.x;
+        const dy = ty - this.y;
+        const dist = Math.hypot(dx, dy);
+        const v = this._minHardwareSpeed();
+
+        if (dist <= 1e-6) {
+            if (Math.abs(tz - this.z) < this.delta) {
+                return this._runHardwareTimedCommand('copter_fly_to_coords', util, {
+                    durationMs: 1,
+                    start: () => {},
+                    finish: () => {
+                        this.init_start_coordinates();
+                    }
+                });
+            }
+            this.z = tz;
+            return this._runHardwareTargetCommand('copter_fly_to_coords', util, {
+                prepare: () => {},
+                dispatch: () => {
+                    this.runtime.QCA.move_with_speed(0, 0, 0, this.z);
+                },
+                isDone: () => {
+                    this.nowz = Number(this.runtime.QCA.get_coord("Z"));
+                    return Math.abs(this.nowz - this.z) < this.delta;
+                },
+                finish: () => {
+                    this.runtime.QCA.hoverStop();
+                    this.init_start_coordinates();
+                }
+            });
+        }
+
+        const durationMs = Math.max(4000, (dist / v) * 1000);
+        const vx = (dx / dist) * v;
+        const vy = (dy / dist) * v;
+        return this._runHardwareTimedCommand('copter_fly_to_coords', util, {
+            durationMs,
+            start: () => {
+                this.z = tz;
+                this.runtime.QCA.move_with_speed(vx, vy, 0, this.z);
             },
             finish: () => {
                 this.runtime.QCA.hoverStop();
+                this.init_start_coordinates();
             }
         });
     }
@@ -1078,23 +1148,22 @@ class Scratch3QuadcopterBlocks {
         }
 
         // --- Hardware path ---
-        return this._runHardwareTargetCommand('copter_rotate', util, {
-            prepare: () => {
-                this.init_start_coordinates();
-                this.yaw += Number(args.DEGREES);
-                if ((this.yaw > 360) || (this.yaw < -360)) {
-                    this.yaw = this.cast_yaw_to_360(this.yaw);
-                }
-            },
-            dispatch: () => {
-                this.runtime.QCA.move_to_coord(this.x, this.y, this.z, this.yaw);
-            },
-            isDone: () => {
-                this.noww = Number(this.runtime.QCA.get_coord("W"));
-                return Math.abs(this.noww - this.yaw) < 3;
+        this.init_start_coordinates();
+        const deltaDeg = Number(args.DEGREES);
+        const startW = this.yaw;
+        const targetW = this._castYawTo360(startW + deltaDeg);
+        const turn = this._shortestYawDeltaDeg(startW, targetW);
+        const durationMs = Math.max(2500, (Math.abs(turn) / HARDWARE_YAW_RATE_DPS) * 1000);
+        const yawRate = Math.abs(turn) < 1e-3 ? 0 : Math.sign(turn) * HARDWARE_YAW_RATE_DPS;
+        return this._runHardwareTimedCommand('copter_rotate', util, {
+            durationMs,
+            start: () => {
+                this.z = Number(this.runtime.QCA.get_coord("Z"));
+                this.runtime.QCA.move_with_speed(0, 0, yawRate, this.z);
             },
             finish: () => {
                 this.runtime.QCA.hoverStop();
+                this.init_start_coordinates();
             }
         });
     }
