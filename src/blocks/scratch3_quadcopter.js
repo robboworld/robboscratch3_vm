@@ -1215,7 +1215,7 @@ class Scratch3QuadcopterBlocks {
         const startW = this.yaw;
         const targetW = this._castYawTo360(startW + deltaDeg);
         const turn = this._shortestYawDeltaDeg(startW, targetW);
-        const durationMs = Math.max(2500, (Math.abs(turn) / HARDWARE_YAW_RATE_DPS) * 1000);
+        const durationMs = (Math.abs(turn) / HARDWARE_YAW_RATE_DPS) * 1000;
         const yawRate = Math.abs(turn) < 1e-3 ? 0 : Math.sign(turn) * HARDWARE_YAW_RATE_DPS;
         return this._runHardwareTimedCommand('copter_rotate', util, {
             durationMs,
