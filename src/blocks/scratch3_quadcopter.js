@@ -21,7 +21,7 @@ const SIM_YAW_TOLERANCE = 2.5;
 
 /**
  * Полёт по железу: в воздухе используем velocity setpoints + hoverStop (как cflib MotionCommander).
- * Исключение: пошаговая посадка copter_land — только position setpoints.
+ * Исключение: copter_land на железе — один вызов HL land в сессии (как cfclient).
  * @see https://www.bitcraze.io/documentation/repository/crazyflie-firmware/master/functional-areas/sensor-to-control/commanders_setpoints/
  */
 const HARDWARE_YAW_RATE_DPS = 72;
@@ -527,18 +527,32 @@ class Scratch3QuadcopterBlocks {
             return;
         }
 
-        // --- Hardware path (original) ---
+        // --- Hardware path: HL takeoff once (mirrors cfclient Flight Tab Take off button) ---
         return this._runHardwareTargetCommand('copter_fly_up', util, {
+            timeoutMs: HARDWARE_LONG_TARGET_COMMAND_TIMEOUT_MS,
+            intervalMs: 200,
             prepare: () => {
                 this.init_start_coordinates();
                 this.z = this.z + 0.3;
+                this._copterTakeoffHlScheduled = false;
             },
             dispatch: () => {
-                this.runtime.QCA.move_with_speed(0, 0, 0, this.z);
+                if (this._copterTakeoffHlScheduled) {
+                    return;
+                }
+                this._copterTakeoffHlScheduled = true;
+                this.runtime.QCA.takeoff(this.z);
             },
-            isDone: () => Math.abs(Number(this.runtime.QCA.get_coord("Z")) - this.z) < this.delta,
+            isDone: () => {
+                if (!this.runtime.QCA.isQuadcopterConnected()) {
+                    return true;
+                }
+                const nowZ = Number(this.runtime.QCA.get_coord("Z"));
+                // HL takeoff may use a higher absolute target than `this.z` when telemetry Z is stale
+                // (see QCA.takeoff); finish once we've reached at least the block's nominal height.
+                return Number.isFinite(nowZ) && nowZ >= this.z - this.delta;
+            },
             finish: () => {
-                this.runtime.QCA.hoverStop();
                 this.init_start_coordinates();
             }
         });
@@ -589,21 +603,37 @@ class Scratch3QuadcopterBlocks {
             return;
         }
 
-        // --- Hardware path ---
+        // --- Hardware path: HL land once; link stays open (cfclient-style). ---
         return this._runHardwareTargetCommand('copter_land', util, {
             timeoutMs: HARDWARE_LONG_TARGET_COMMAND_TIMEOUT_MS,
             intervalMs: 200,
             intervalSlot: 'landing',
             prepare: () => {
                 this.init_start_coordinates();
+                this._copterLandHlScheduled = false;
+                const estimateMs = typeof this.runtime.QCA.computeHlLandWaitMs === 'function'
+                    ? this.runtime.QCA.computeHlLandWaitMs()
+                    : 4000;
+                this._landBlockDeadlineMs = Date.now() + estimateMs;
             },
             dispatch: () => {
-                this.runtime.QCA.move_to_coord(this.x, this.y, this.z, this.yaw);
-                this.z -= 0.1;
-            },
-            isDone: () => this.z <= 0.1,
-            finish: () => {
+                if (this._copterLandHlScheduled) {
+                    return;
+                }
+                this._copterLandHlScheduled = true;
                 this.runtime.QCA.landAndClose();
+            },
+            isDone: (context, elapsedMs) => {
+                if (!this.runtime.QCA.isQuadcopterConnected()) {
+                    return true;
+                }
+                if (typeof this._landBlockDeadlineMs === 'number') {
+                    return Date.now() >= this._landBlockDeadlineMs;
+                }
+                return elapsedMs >= 4000;
+            },
+            finish: () => {
+                this.init_start_coordinates();
             }
         });
     }
