@@ -54,6 +54,9 @@ class QuadcopterCommandCoordinator {
 
         if (mode === 'timed') {
             shouldFinish = elapsedMs >= command.durationMs;
+            if (!shouldFinish && typeof command.shouldFinish === 'function') {
+                shouldFinish = command.shouldFinish(command.context, elapsedMs) === true;
+            }
         } else if (typeof command.shouldFinish === 'function') {
             shouldFinish = command.shouldFinish(command.context, elapsedMs) === true;
         }

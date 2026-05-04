@@ -28,6 +28,10 @@ const HARDWARE_YAW_RATE_DPS = 72;
 /** Ожидание isDone по телеметрии — верхняя граница (секунды полёта редко дольше). */
 const HARDWARE_TARGET_COMMAND_TIMEOUT_MS = 45000;
 const HARDWARE_LONG_TARGET_COMMAND_TIMEOUT_MS = 120000;
+/** HL go_to / distance: finish early when within this 3D error (m). */
+const HARDWARE_POS_TOL_M = 0.07;
+/** Upper bound on block wait beyond nominal HL trajectory (radio + planner). */
+const HARDWARE_HL_EXTRA_WAIT_MS = 650;
 
 class Scratch3QuadcopterBlocks {
     constructor (runtime) {
@@ -456,7 +460,8 @@ class Scratch3QuadcopterBlocks {
     _runHardwareTimedCommand (commandKey, util, opts) {
         const softCeiling = (opts.durationMs || 0) + 15000;
         const timeoutMs = opts.timeoutMs !== undefined ? opts.timeoutMs : softCeiling;
-        this.commandCoordinator.runTargetCommand(commandKey, util, {
+        this.commandCoordinator.runTimedCommand(commandKey, util, {
+            durationMs: opts.durationMs,
             timeoutMs,
             start: () => {
                 const context = {
@@ -468,12 +473,12 @@ class Scratch3QuadcopterBlocks {
                 }
                 return context;
             },
-            shouldFinish: (context, elapsedMs) => {
+            shouldFinish: context => {
                 if (!this.runtime.QCA.isQuadcopterConnected()) {
                     context.disconnected = true;
                     return true;
                 }
-                return elapsedMs >= context.durationMs;
+                return false;
             },
             finish: (context, timedOut) => {
                 if (typeof opts.finish === 'function') {
@@ -699,22 +704,48 @@ class Scratch3QuadcopterBlocks {
             return;
         }
 
-        // --- Hardware path ---
+        // --- Hardware path: HL go_to (cflib HighLevelCommander, COMMAND_GO_TO_2) ---
         this.init_start_coordinates();
         const meters = Number(args.METERS);
-        const v = this._minHardwareSpeed();
-        const durationMs = Math.abs(meters) < 1e-6
-            ? 1
-            : Math.max(3000, (Math.abs(meters) / v) * 1000);
+        if (Math.abs(meters) < 1e-6) {
+            return this._runHardwareTimedCommand('copter_fly_distance', util, {
+                durationMs: 1,
+                start: () => {},
+                finish: () => this.init_start_coordinates()
+            });
+        }
         const heading = (this.yaw + this.dir) * Math.PI / 180;
-        const dir = meters >= 0 ? 1 : -1;
-        const vx = dir * v * Math.cos(heading);
-        const vy = dir * v * Math.sin(heading);
-        return this._runHardwareTimedCommand('copter_fly_distance', util, {
-            durationMs,
-            start: () => {
-                this.z = Number(this.runtime.QCA.get_coord("Z"));
-                this.runtime.QCA.move_with_speed(vx, vy, 0, this.z);
+        const tx = this.x + meters * Math.cos(heading);
+        const ty = this.y + meters * Math.sin(heading);
+        const tz = Number(this.runtime.QCA.get_coord('Z'));
+        const moveVel = typeof this.runtime.QCA.getFlightMoveVelocityMps === 'function'
+            ? this.runtime.QCA.getFlightMoveVelocityMps()
+            : 0.5;
+        const durationS = Math.max(0.25, Math.abs(meters) / moveVel);
+        const yawRad = typeof this.runtime.QCA.telemetryYawToHeadingRad === 'function'
+            ? this.runtime.QCA.telemetryYawToHeadingRad(Number(this.runtime.QCA.get_coord('W')))
+            : Number(this.runtime.QCA.get_coord('W'));
+        const deadlineMs = Date.now() + durationS * 1000 + HARDWARE_HL_EXTRA_WAIT_MS;
+
+        return this._runHardwareTargetCommand('copter_fly_distance', util, {
+            timeoutMs: HARDWARE_LONG_TARGET_COMMAND_TIMEOUT_MS,
+            intervalMs: 200,
+            prepare: () => {
+                this._copterGoToDistScheduled = false;
+            },
+            dispatch: () => {
+                if (this._copterGoToDistScheduled) return;
+                this._copterGoToDistScheduled = true;
+                this.runtime.QCA.goToHighLevel(tx, ty, tz, yawRad, durationS);
+            },
+            isDone: () => {
+                if (!this.runtime.QCA.isQuadcopterConnected()) return true;
+                if (Date.now() >= deadlineMs) return true;
+                const x = Number(this.runtime.QCA.get_coord('X'));
+                const y = Number(this.runtime.QCA.get_coord('Y'));
+                const z = Number(this.runtime.QCA.get_coord('Z'));
+                if (![x, y, z].every(Number.isFinite)) return false;
+                return Math.hypot(x - tx, y - ty, z - tz) < HARDWARE_POS_TOL_M;
             },
             finish: () => {
                 this.runtime.QCA.hoverStop();
@@ -1091,7 +1122,7 @@ class Scratch3QuadcopterBlocks {
             return;
         }
 
-        // --- Hardware path ---
+        // --- Hardware path: HL go_to (cflib); 3D path + early stop on telemetry ---
         this.x_telemetry_delta = this.runtime.QCA.get_x_telemetry_delta();
         this.y_telemetry_delta = this.runtime.QCA.get_y_telemetry_delta();
         this.init_start_coordinates();
@@ -1100,44 +1131,45 @@ class Scratch3QuadcopterBlocks {
         const tz = Number(args.Z_COORD);
         const dx = tx - this.x;
         const dy = ty - this.y;
-        const dist = Math.hypot(dx, dy);
-        const v = this._minHardwareSpeed();
+        const dz = tz - this.z;
+        const pathLen = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        const moveVel = typeof this.runtime.QCA.getFlightMoveVelocityMps === 'function'
+            ? this.runtime.QCA.getFlightMoveVelocityMps()
+            : 0.5;
+        const yawRad = typeof this.runtime.QCA.telemetryYawToHeadingRad === 'function'
+            ? this.runtime.QCA.telemetryYawToHeadingRad(Number(this.runtime.QCA.get_coord('W')))
+            : Number(this.runtime.QCA.get_coord('W'));
 
-        if (dist <= 1e-6) {
-            if (Math.abs(tz - this.z) < this.delta) {
-                return this._runHardwareTimedCommand('copter_fly_to_coords', util, {
-                    durationMs: 1,
-                    start: () => {},
-                    finish: () => {
-                        this.init_start_coordinates();
-                    }
-                });
-            }
-            this.z = tz;
-            return this._runHardwareTargetCommand('copter_fly_to_coords', util, {
-                prepare: () => {},
-                dispatch: () => {
-                    this.runtime.QCA.move_with_speed(0, 0, 0, this.z);
-                },
-                isDone: () => {
-                    this.nowz = Number(this.runtime.QCA.get_coord("Z"));
-                    return Math.abs(this.nowz - this.z) < this.delta;
-                },
-                finish: () => {
-                    this.runtime.QCA.hoverStop();
-                    this.init_start_coordinates();
-                }
+        if (pathLen < 1e-6) {
+            return this._runHardwareTimedCommand('copter_fly_to_coords', util, {
+                durationMs: 1,
+                start: () => {},
+                finish: () => this.init_start_coordinates()
             });
         }
 
-        const durationMs = Math.max(4000, (dist / v) * 1000);
-        const vx = (dx / dist) * v;
-        const vy = (dy / dist) * v;
-        return this._runHardwareTimedCommand('copter_fly_to_coords', util, {
-            durationMs,
-            start: () => {
-                this.z = tz;
-                this.runtime.QCA.move_with_speed(vx, vy, 0, this.z);
+        const durationS = Math.max(0.25, pathLen / moveVel);
+        const deadlineMs = Date.now() + durationS * 1000 + HARDWARE_HL_EXTRA_WAIT_MS;
+
+        return this._runHardwareTargetCommand('copter_fly_to_coords', util, {
+            timeoutMs: HARDWARE_LONG_TARGET_COMMAND_TIMEOUT_MS,
+            intervalMs: 200,
+            prepare: () => {
+                this._copterGoToCoordsScheduled = false;
+            },
+            dispatch: () => {
+                if (this._copterGoToCoordsScheduled) return;
+                this._copterGoToCoordsScheduled = true;
+                this.runtime.QCA.goToHighLevel(tx, ty, tz, yawRad, durationS);
+            },
+            isDone: () => {
+                if (!this.runtime.QCA.isQuadcopterConnected()) return true;
+                if (Date.now() >= deadlineMs) return true;
+                const x = Number(this.runtime.QCA.get_coord('X'));
+                const y = Number(this.runtime.QCA.get_coord('Y'));
+                const z = Number(this.runtime.QCA.get_coord('Z'));
+                if (![x, y, z].every(Number.isFinite)) return false;
+                return Math.hypot(x - tx, y - ty, z - tz) < HARDWARE_POS_TOL_M;
             },
             finish: () => {
                 this.runtime.QCA.hoverStop();
