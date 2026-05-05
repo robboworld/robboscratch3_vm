@@ -32,6 +32,8 @@ const HARDWARE_LONG_TARGET_COMMAND_TIMEOUT_MS = 120000;
 const HARDWARE_POS_TOL_M = 0.07;
 /** Upper bound on block wait beyond nominal HL trajectory (radio + planner). */
 const HARDWARE_HL_EXTRA_WAIT_MS = 650;
+/** Do not start horizontal flight when voltage is already in the observed drop zone. */
+const HARDWARE_MIN_FLIGHT_VBAT = 3.05;
 
 class Scratch3QuadcopterBlocks {
     constructor (runtime) {
@@ -271,6 +273,17 @@ class Scratch3QuadcopterBlocks {
         this._simClearAllTimeouts();
         this.commandCoordinator.cancel('projectStopAll');
         this._clearHardwareCommandIntervals();
+        try {
+            if (this.runtime && this.runtime.QCA) {
+                if (typeof this.runtime.QCA.stopCommands === 'function') {
+                    this.runtime.QCA.stopCommands('projectStopAll');
+                } else if (typeof this.runtime.QCA.disconnect === 'function') {
+                    this.runtime.QCA.disconnect('projectStopAll');
+                }
+            }
+        } catch (e) {
+            // Best-effort: stop should never throw.
+        }
         this.fack = 0;
     }
 
@@ -376,6 +389,17 @@ class Scratch3QuadcopterBlocks {
         return d;
     }
 
+    _getHardwareBatterySnapshot () {
+        if (!this.runtime || !this.runtime.QCA || typeof this.runtime.QCA.getTelemetrySnapshot !== 'function') {
+            return {vbat: 0, batteryPercent: 0};
+        }
+        const snapshot = this.runtime.QCA.getTelemetrySnapshot();
+        return {
+            vbat: Number(snapshot && snapshot.vbat),
+            batteryPercent: Number(snapshot && snapshot.batteryPercent)
+        };
+    }
+
     _clearHardwareCommandIntervals () {
         if (this.SendCordInterval) {
             clearInterval(this.SendCordInterval);
@@ -394,18 +418,17 @@ class Scratch3QuadcopterBlocks {
         this.commandCoordinator.runTargetCommand(commandKey, util, {
             timeoutMs: ceiling,
             start: () => {
+                let preparedContext = {};
                 if (typeof opts.prepare === 'function') {
-                    opts.prepare();
+                    preparedContext = opts.prepare() || {};
                 }
-                const context = {
-                    disconnected: false
-                };
+                const context = Object.assign({disconnected: false}, preparedContext);
                 context.intervalId = setInterval(() => {
                     if (!this.runtime.QCA.isQuadcopterConnected()) {
                         context.disconnected = true;
                         return;
                     }
-                    opts.dispatch();
+                    opts.dispatch(context);
                 }, opts.intervalMs || 100);
 
                 if (opts.intervalSlot === 'landing') {
@@ -703,7 +726,6 @@ class Scratch3QuadcopterBlocks {
         }
 
         // --- Hardware path: HL go_to (cflib HighLevelCommander, COMMAND_GO_TO_2) ---
-        this.init_start_coordinates();
         const meters = Number(args.METERS);
         if (Math.abs(meters) < 1e-6) {
             return this._runHardwareTimedCommand('copter_fly_distance', util, {
@@ -712,41 +734,72 @@ class Scratch3QuadcopterBlocks {
                 finish: () => this.init_start_coordinates()
             });
         }
-        const heading = (this.yaw + this.dir) * Math.PI / 180;
-        const tx = this.x + meters * Math.cos(heading);
-        const ty = this.y + meters * Math.sin(heading);
-        const tz = Number(this.runtime.QCA.get_coord('Z'));
-        const moveVel = typeof this.runtime.QCA.getFlightMoveVelocityMps === 'function'
-            ? this.runtime.QCA.getFlightMoveVelocityMps()
-            : 0.5;
-        const durationS = Math.max(0.25, Math.abs(meters) / moveVel);
-        const yawRad = typeof this.runtime.QCA.telemetryYawToHeadingRad === 'function'
-            ? this.runtime.QCA.telemetryYawToHeadingRad(Number(this.runtime.QCA.get_coord('W')))
-            : Number(this.runtime.QCA.get_coord('W'));
-        const deadlineMs = Date.now() + durationS * 1000 + HARDWARE_HL_EXTRA_WAIT_MS;
 
         return this._runHardwareTargetCommand('copter_fly_distance', util, {
             timeoutMs: HARDWARE_LONG_TARGET_COMMAND_TIMEOUT_MS,
             intervalMs: 200,
             prepare: () => {
+                this.init_start_coordinates();
+                const battery = this._getHardwareBatterySnapshot();
+                const lowBattery = Number.isFinite(battery.vbat) &&
+                    battery.vbat > 0 &&
+                    battery.vbat < HARDWARE_MIN_FLIGHT_VBAT;
+                const relativeHeading = this.dir * Math.PI / 180;
+                const dx = meters * Math.cos(relativeHeading);
+                const dy = meters * Math.sin(relativeHeading);
+                const tx = this.x + dx;
+                const ty = this.y + dy;
+                const tz = Number(this.runtime.QCA.get_coord('Z'));
+                const moveVel = typeof this.runtime.QCA.getFlightMoveVelocityMps === 'function'
+                    ? this.runtime.QCA.getFlightMoveVelocityMps()
+                    : 0.5;
+                const durationS = Math.max(0.25, Math.abs(meters) / moveVel);
+                const yawRad = 0;
+                const deadlineMs = Date.now() + durationS * 1000 + HARDWARE_HL_EXTRA_WAIT_MS;
                 this._copterGoToDistScheduled = false;
+                this._copterGoToDistDoneLogged = false;
+                return {dx, dy, tx, ty, tz, yawRad, durationS, deadlineMs, startX: this.x, startY: this.y, startZ: this.z, battery, lowBattery};
             },
-            dispatch: () => {
+            dispatch: context => {
+                if (context.lowBattery) {
+                    if (!context.lowBatteryLandingScheduled) {
+                        context.lowBatteryLandingScheduled = true;
+                        if (this.runtime.QCA && typeof this.runtime.QCA.landForLowBattery === 'function') {
+                            this.runtime.QCA.landForLowBattery(context.battery);
+                        } else {
+                            this.runtime.QCA.landAndClose();
+                        }
+                    }
+                    return;
+                }
                 if (this._copterGoToDistScheduled) return;
                 this._copterGoToDistScheduled = true;
-                this.runtime.QCA.goToHighLevel(tx, ty, tz, yawRad, durationS);
+                this.runtime.QCA.goToHighLevel(context.dx, context.dy, 0, context.yawRad, context.durationS, {relative: true, forceLegacy: true});
             },
-            isDone: () => {
+            isDone: context => {
+                if (context.lowBattery) {
+                    if (!this._copterGoToDistDoneLogged) {
+                        this._copterGoToDistDoneLogged = true;
+                    }
+                    return true;
+                }
                 if (!this.runtime.QCA.isQuadcopterConnected()) return true;
-                if (Date.now() >= deadlineMs) return true;
                 const x = Number(this.runtime.QCA.get_coord('X'));
                 const y = Number(this.runtime.QCA.get_coord('Y'));
                 const z = Number(this.runtime.QCA.get_coord('Z'));
                 if (![x, y, z].every(Number.isFinite)) return false;
-                return Math.hypot(x - tx, y - ty, z - tz) < HARDWARE_POS_TOL_M;
+                const distanceToTarget = Math.hypot(x - context.tx, y - context.ty, z - context.tz);
+                const reachedTarget = distanceToTarget < HARDWARE_POS_TOL_M;
+                const deadlineReached = Date.now() >= context.deadlineMs;
+                if ((reachedTarget || deadlineReached) && !this._copterGoToDistDoneLogged) {
+                    this._copterGoToDistDoneLogged = true;
+                }
+                return reachedTarget || deadlineReached;
             },
-            finish: () => {
-                this.runtime.QCA.hoverStop();
+            finish: context => {
+                if (!context.lowBattery) {
+                    this.runtime.QCA.hoverStop();
+                }
                 this.init_start_coordinates();
             }
         });
