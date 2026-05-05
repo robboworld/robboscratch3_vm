@@ -275,7 +275,11 @@ class Scratch3QuadcopterBlocks {
         this._clearHardwareCommandIntervals();
         try {
             if (this.runtime && this.runtime.QCA) {
-                if (typeof this.runtime.QCA.stopCommands === 'function') {
+                if (typeof this.runtime.QCA.isQuadcopterConnected === 'function' &&
+                    this.runtime.QCA.isQuadcopterConnected() &&
+                    typeof this.runtime.QCA.hoverStop === 'function') {
+                    this.runtime.QCA.hoverStop();
+                } else if (typeof this.runtime.QCA.stopCommands === 'function') {
                     this.runtime.QCA.stopCommands('projectStopAll');
                 } else if (typeof this.runtime.QCA.disconnect === 'function') {
                     this.runtime.QCA.disconnect('projectStopAll');
