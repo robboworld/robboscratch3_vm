@@ -683,7 +683,7 @@ class Scratch3QuadcopterBlocks {
         this.commandCoordinator.cancel('manualStop');
         this._clearHardwareCommandIntervals();
         if (this.runtime.QCA && typeof this.runtime.QCA.emergencyStop === 'function') {
-            this.runtime.QCA.emergencyStop();
+            this.runtime.QCA.emergencyStop({keepConnected: true});
         } else if (this.runtime.QCA && typeof this.runtime.QCA.landAndClose === 'function') {
             this.runtime.QCA.landAndClose();
         }
