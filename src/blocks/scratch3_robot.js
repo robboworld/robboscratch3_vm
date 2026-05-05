@@ -272,6 +272,7 @@ class Scratch3RobotBlocks {
       this.runtime.going = false;
       clearInterval(this.sim_int);
       this.sim_int = null;
+      this.runtime.emit('ROBBO_SIM_SPRITES_INVALIDATED', {robot: true, copter: false});
       return util.target;
     }
     return robot;
@@ -283,6 +284,7 @@ class Scratch3RobotBlocks {
     const robot = this.runtime.targets.find(t => !t.isStage && t.sprite && names.includes(t.sprite.name));
     if (!robot) {
       this.runtime.sim_ac = false;
+      this.runtime.emit('ROBBO_SIM_SPRITES_INVALIDATED', {robot: true, copter: false});
       return [];
     }
     return this.simSensorProbes.map((sensorCfg, idx) => {
