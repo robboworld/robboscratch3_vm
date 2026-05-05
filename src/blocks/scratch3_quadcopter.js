@@ -679,10 +679,14 @@ class Scratch3QuadcopterBlocks {
             return;
         }
 
-        // --- Hardware path ---
+        // --- Hardware path: immediate motor cut / emergency (not HL land). ---
         this.commandCoordinator.cancel('manualStop');
         this._clearHardwareCommandIntervals();
-        this.runtime.QCA.landAndClose();
+        if (this.runtime.QCA && typeof this.runtime.QCA.emergencyStop === 'function') {
+            this.runtime.QCA.emergencyStop();
+        } else if (this.runtime.QCA && typeof this.runtime.QCA.landAndClose === 'function') {
+            this.runtime.QCA.landAndClose();
+        }
     }
 
     copter_status (args, util) {
@@ -748,9 +752,10 @@ class Scratch3QuadcopterBlocks {
                 const lowBattery = Number.isFinite(battery.vbat) &&
                     battery.vbat > 0 &&
                     battery.vbat < HARDWARE_MIN_FLIGHT_VBAT;
-                const relativeHeading = this.dir * Math.PI / 180;
-                const dx = meters * Math.cos(relativeHeading);
-                const dy = meters * Math.sin(relativeHeading);
+                // Body-relative movement in world frame: same convention as velocity blocks (yaw + dir).
+                const headingRad = (Number(this.yaw) + Number(this.dir)) * Math.PI / 180;
+                const dx = meters * Math.cos(headingRad);
+                const dy = meters * Math.sin(headingRad);
                 const tx = this.x + dx;
                 const ty = this.y + dy;
                 const tz = Number(this.runtime.QCA.get_coord('Z'));
