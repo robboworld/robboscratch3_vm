@@ -12,7 +12,9 @@
   "main": "./dist/node/scratch-vm.js",
   "browser": "./src/index.js",
   "scripts": {
-    "build": "npm run docs && webpack --progress --colors --bail",
+    "build": "npm run build:dev",
+    "build:dev": "BUILD_MODE=app webpack --progress --colors --bail",
+    "build:release": "npm run docs && NODE_ENV=production BUILD_MODE=app webpack --progress --colors --bail",
     "coverage": "tap ./test/{unit,integration}/*.js --coverage --coverage-report=lcov",
     "deploy": "touch playground/.nojekyll && gh-pages -t -d playground -m \"Build for $(git log --pretty=format:%H -n1)\"",
     "docs": "jsdoc -c .jsdoc.json",
@@ -58,6 +60,7 @@
     "adm-zip": "0.4.11",
     "babel-eslint": "^10.0.1",
     "babel-loader": "^8.0.4",
+    "cache-loader": "^4.1.0",
     "copy-webpack-plugin": "^4.5.4",
     "docdash": "^1.0.0",
     "eslint": "^5.3.0",
