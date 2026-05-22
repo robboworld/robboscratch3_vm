@@ -2,6 +2,39 @@ const Cast = require('../util/cast');
 const MathUtil = require('../util/math-util');
 const Timer = require('../util/timer');
 const QuadcopterCommandCoordinator = require('./quadcopter-command-coordinator');
+const formatMessage = require('format-message');
+
+/** Localized labels for copter_direction / copter_directions (scratch-l10n + scratch_msgs). */
+const COPTER_DIR_MSG = {
+    forward: {id: 'COPTER_DIRECTION_FORWARD', default: 'Forward'},
+    backward: {id: 'COPTER_DIRECTION_BACKWARD', default: 'Backward'},
+    left: {id: 'COPTER_DIRECTION_LEFT', default: 'Left'},
+    right: {id: 'COPTER_DIRECTION_RIGHT', default: 'Right'}
+};
+
+const COPTER_DIR_DEGREES = {
+    forward: 0,
+    left: 90,
+    backward: 180,
+    right: 270
+};
+
+/** Fallback when VM locale map lacks scratch_msgs (GUI merges ScratchMsgs in blocks.jsx). */
+const COPTER_DIR_LABELS_BY_LOCALE = {
+    ru: {
+        forward: 'Вперёд',
+        backward: 'Назад',
+        left: 'Налево',
+        right: 'Направо'
+    },
+    en: {
+        forward: 'Forward',
+        backward: 'Backward',
+        left: 'Left',
+        right: 'Right'
+    }
+};
+
 
 const COPTER_SPRITE_NAME = 'Robbo Quadcopter';
 const COSTUME_IDLE = 0;
@@ -1290,26 +1323,64 @@ class Scratch3QuadcopterBlocks {
         });
     }
 
-    copter_set_direction (args, util) {
-        switch (args.DIRECTION) {
-          case 'direction_forward':
-            this.dir = 0;
-          break;
-          case 'direction_right':
-            this.dir = 270;
-          break;
-          case 'direction_backward':
-            this.dir = 180;
-          break;
-          case 'direction_left':
-            this.dir = 90;
-          break;
-        }
+    copter_set_direction (args) {
+        const raw = args.DIRECTION !== undefined ? args.DIRECTION : args.COPTER_DIRECTIONS;
+        this._applyDirectionKey(this._normalizeDirectionArg(raw));
     }
 
-    copter_direction (args, util) {
-        if (this.runtime.sim_copter_ac) return Number(this.sim_yaw.toFixed(1));
-        return this.runtime.QCA.get_coord("W");
+    /**
+     * @param {*} raw dropdown value, localized label, or legacy direction_* key
+     * @returns {'forward'|'backward'|'left'|'right'}
+     */
+    _normalizeDirectionArg (raw) {
+        const s = Cast.toString(raw);
+        const legacy = {
+            direction_forward: 'forward',
+            direction_backward: 'backward',
+            direction_left: 'left',
+            direction_right: 'right'
+        };
+        if (legacy[s]) return legacy[s];
+        if (Object.prototype.hasOwnProperty.call(COPTER_DIR_DEGREES, s)) return s;
+        for (const key of Object.keys(COPTER_DIR_MSG)) {
+            if (s === formatMessage(COPTER_DIR_MSG[key]) || s === COPTER_DIR_MSG[key].default) {
+                return key;
+            }
+        }
+        for (const locale of Object.keys(COPTER_DIR_LABELS_BY_LOCALE)) {
+            const table = COPTER_DIR_LABELS_BY_LOCALE[locale];
+            for (const key of Object.keys(table)) {
+                if (s === table[key]) return key;
+            }
+        }
+        return 'forward';
+    }
+
+    _applyDirectionKey (key) {
+        this.dir = COPTER_DIR_DEGREES[key] !== undefined ? COPTER_DIR_DEGREES[key] : 0;
+    }
+
+    _dirKeyFromDegrees (degrees) {
+        const d = Number(degrees);
+        if (d === 90) return 'left';
+        if (d === 180) return 'backward';
+        if (d === 270) return 'right';
+        return 'forward';
+    }
+
+    _dirLabelFromKey (key) {
+        const msgDef = COPTER_DIR_MSG[key] || COPTER_DIR_MSG.forward;
+        const viaFormat = formatMessage(msgDef);
+        if (viaFormat !== msgDef.default) {
+            return viaFormat;
+        }
+        const locale = (this.runtime && this.runtime.getLocale) ? this.runtime.getLocale() : 'en';
+        const table = COPTER_DIR_LABELS_BY_LOCALE[locale] || COPTER_DIR_LABELS_BY_LOCALE.en;
+        return table[key] || table.forward;
+    }
+
+    copter_direction () {
+        return this._dirLabelFromKey(this._dirKeyFromDegrees(this.dir));
     }
 
     init_start_coordinates () {
