@@ -120,24 +120,28 @@ class Scratch3QuadcopterBlocks {
     getPrimitives () {
         return {
             copter_fly_up: this.copter_fly_up,
-            copter_land:this.copter_land,
-            copter_stop:this.copter_stop,
-            copter_status:this.copter_status,
-            copter_fly_distance:this.copter_fly_distance,
-            copter_fly_time:this.copter_fly_time,
-            copter_fly_for_time_with_speed:this.copter_fly_for_time_with_speed,
-            copter_change_x_by:this.copter_change_x_by,
-            copter_change_y_by:this.copter_change_y_by,
-            copter_change_z_by:this.copter_change_z_by,
-            copter_x_coord:this.copter_x_coord,
-            copter_y_coord:this.copter_y_coord,
-            copter_z_coord:this.copter_z_coord,
-            copter_yaw:this.copter_yaw,
-            copter_fly_for_seconds_to_coords:this.copter_fly_for_seconds_to_coords,
-            copter_fly_to_coords:this.copter_fly_to_coords,
-            copter_rotate:this.copter_rotate,
-            copter_set_direction:this.copter_set_direction,
-            copter_direction:this.copter_direction
+            copter_land: this.copter_land,
+            copter_stop: this.copter_stop,
+            copter_status: this.copter_status,
+            copter_fly_distance: this.copter_fly_distance,
+            copter_fly_time: this.copter_fly_time,
+            copter_fly_for_time_with_speed: this.copter_fly_for_time_with_speed,
+            copter_change_x_by: this.copter_change_x_by,
+            copter_change_y_by: this.copter_change_y_by,
+            copter_change_z_by: this.copter_change_z_by,
+            copter_change_axis_by: this.copter_change_axis_by,
+            copter_x_coord: this.copter_x_coord,
+            copter_y_coord: this.copter_y_coord,
+            copter_z_coord: this.copter_z_coord,
+            copter_yaw: this.copter_yaw,
+            copter_fly_for_seconds_to_coords: this.copter_fly_for_seconds_to_coords,
+            copter_fly_to_coords: this.copter_fly_to_coords,
+            copter_rotate: this.copter_rotate,
+            copter_set_direction: this.copter_set_direction,
+            copter_direction: this.copter_direction,
+            copter_battery: this.copter_battery,
+            copter_is_flying: this.copter_is_flying,
+            copter_set_speed: this.copter_set_speed
         };
     }
 
@@ -734,6 +738,9 @@ class Scratch3QuadcopterBlocks {
     }
 
     copter_fly_distance (args, util) {
+        if (this.fack === 0 && args.DIRECTION !== undefined) {
+            this._applyDirectionKey(this._normalizeDirectionArg(args.DIRECTION));
+        }
         if (this.runtime.sim_copter_ac) {
             if (!this._ensureSimCopterSprite(util)) return;
             if (this.fack === 0) {
@@ -848,6 +855,9 @@ class Scratch3QuadcopterBlocks {
     }
 
     copter_fly_time (args, util) {
+        if (this.fack === 0 && args.DIRECTION !== undefined) {
+            this._applyDirectionKey(this._normalizeDirectionArg(args.DIRECTION));
+        }
         if (this.runtime.sim_copter_ac) {
             if (!this._ensureSimCopterSprite(util)) return;
             if (this.fack === 0) {
@@ -1381,6 +1391,34 @@ class Scratch3QuadcopterBlocks {
 
     copter_direction () {
         return this._dirLabelFromKey(this._dirKeyFromDegrees(this.dir));
+    }
+
+    copter_change_axis_by (args, util) {
+        const axis = Cast.toString(args.AXIS).toUpperCase();
+        if (axis === 'Y') return this.copter_change_y_by(args, util);
+        if (axis === 'Z') return this.copter_change_z_by(args, util);
+        return this.copter_change_x_by(args, util);
+    }
+
+    copter_battery () {
+        if (this.runtime.sim_copter_ac) return this.sim_battery;
+        if (!this.runtime.QCA || typeof this.runtime.QCA.getTelemetrySnapshot !== 'function') return 0;
+        const snap = this.runtime.QCA.getTelemetrySnapshot();
+        return snap ? (Number(snap.batteryPercent) || 0) : 0;
+    }
+
+    copter_is_flying () {
+        if (this.runtime.sim_copter_ac) return this.sim_is_flying === true;
+        if (!this.runtime.QCA || typeof this.runtime.QCA.isQuadcopterConnected !== 'function') return false;
+        if (!this.runtime.QCA.isQuadcopterConnected()) return false;
+        return Number(this.runtime.QCA.get_coord('Z')) > 0.05;
+    }
+
+    copter_set_speed (args) {
+        const s = Number(args.SPEED);
+        if (Number.isFinite(s) && s > 0) {
+            this.speed = s;
+        }
     }
 
     init_start_coordinates () {
