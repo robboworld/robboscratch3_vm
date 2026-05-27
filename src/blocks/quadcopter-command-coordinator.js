@@ -1,10 +1,20 @@
 class QuadcopterCommandCoordinator {
-    constructor () {
+    constructor (options) {
         this._activeCommand = null;
+        this._onFlightCleanup = options && typeof options.onFlightCleanup === 'function'
+            ? options.onFlightCleanup
+            : null;
     }
 
     get activeCommand () {
         return this._activeCommand;
+    }
+
+    _getOwnerId (util) {
+        if (util && util.thread && util.thread.topBlock) {
+            return String(util.thread.topBlock);
+        }
+        return null;
     }
 
     cancel (reason) {
@@ -15,6 +25,12 @@ class QuadcopterCommandCoordinator {
 
         if (current.cancel) {
             current.cancel(current.context, reason);
+        }
+
+        if (this._onFlightCleanup &&
+            reason !== 'projectStopAll' &&
+            reason !== 'manualStop') {
+            this._onFlightCleanup(reason, current);
         }
     }
 
@@ -29,12 +45,24 @@ class QuadcopterCommandCoordinator {
     _runCommand (mode, key, util, handlers) {
         if (!handlers) return;
 
-        if (!this._activeCommand || this._activeCommand.key !== key || this._activeCommand.mode !== mode) {
-            this.cancel('replaced');
+        const ownerId = this._getOwnerId(util);
+
+        if (this._activeCommand) {
+            if (this._activeCommand.ownerId !== ownerId) {
+                util.yield();
+                return;
+            }
+            if (this._activeCommand.key !== key || this._activeCommand.mode !== mode) {
+                this.cancel('replaced');
+            }
+        }
+
+        if (!this._activeCommand) {
             const context = handlers.start ? (handlers.start() || {}) : {};
             this._activeCommand = {
                 key: key,
                 mode: mode,
+                ownerId: ownerId,
                 context: context,
                 startedAt: Date.now(),
                 durationMs: handlers.durationMs || 0,
