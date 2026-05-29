@@ -84,6 +84,8 @@ const HARDWARE_POS_TOL_M = 0.07;
 const HARDWARE_HL_EXTRA_WAIT_MS = 650;
 /** Do not start horizontal flight when voltage is already in the observed drop zone. */
 const HARDWARE_MIN_FLIGHT_VBAT = 3.05;
+/** Altitude above which hover-hold is safe on project stop (matches {@link copter_is_flying}). */
+const HARDWARE_GROUND_Z_M = 0.05;
 
 class Scratch3QuadcopterBlocks {
     constructor(runtime) {
@@ -332,17 +334,45 @@ class Scratch3QuadcopterBlocks {
         this._simTimeouts.clear();
     }
 
+  /**
+   * True when stop-all should engage hover-hold (in air / active flight), not on the ground.
+   * greenFlag() always calls stopAll() first; hover on idle craft causes a small lift.
+   */
+    _shouldHoverHoldOnProjectStop() {
+        if (!this.runtime || !this.runtime.QCA) return false;
+        if (typeof this.runtime.QCA.isQuadcopterConnected !== 'function' ||
+            !this.runtime.QCA.isQuadcopterConnected()) {
+            return false;
+        }
+        if (this.commandCoordinator.activeCommand) return true;
+        if (this.fack !== 0) return true;
+
+        const snap = typeof this.runtime.QCA.getStatusSnapshot === 'function'
+            ? this.runtime.QCA.getStatusSnapshot()
+            : null;
+        if (snap && snap.flightState === 'commandActive') return true;
+
+        const z = Number(this.runtime.QCA.get_coord('Z'));
+        return Number.isFinite(z) && z > HARDWARE_GROUND_Z_M;
+    }
+
     _onProjectStopAll() {
         this._simClearInterval();
         this._simClearAllTimeouts();
+        const hoverHold = this._shouldHoverHoldOnProjectStop();
         this.commandCoordinator.cancel('projectStopAll');
         this._clearHardwareCommandIntervals();
         try {
             if (this.runtime && this.runtime.QCA) {
                 if (typeof this.runtime.QCA.isQuadcopterConnected === 'function' &&
-                    this.runtime.QCA.isQuadcopterConnected() &&
-                    typeof this.runtime.QCA.hoverStop === 'function') {
-                    this.runtime.QCA.hoverStop();
+                    this.runtime.QCA.isQuadcopterConnected()) {
+                    if (hoverHold && typeof this.runtime.QCA.hoverStop === 'function') {
+                        this.runtime.QCA.hoverStop();
+                    } else if (typeof this.runtime.QCA.stopCommands === 'function') {
+                        this.runtime.QCA.stopCommands('projectStopAll');
+                    } else if (typeof this.runtime.QCA.disconnect === 'function') {
+                        this.runtime.QCA.disconnect('projectStopAll');
+                    }
                 } else if (typeof this.runtime.QCA.stopCommands === 'function') {
                     this.runtime.QCA.stopCommands('projectStopAll');
                 } else if (typeof this.runtime.QCA.disconnect === 'function') {
@@ -1495,7 +1525,7 @@ class Scratch3QuadcopterBlocks {
         if (this.runtime.sim_copter_ac) return this.sim_is_flying === true;
         if (!this.runtime.QCA || typeof this.runtime.QCA.isQuadcopterConnected !== 'function') return false;
         if (!this.runtime.QCA.isQuadcopterConnected()) return false;
-        return Number(this.runtime.QCA.get_coord('Z')) > 0.05;
+        return Number(this.runtime.QCA.get_coord('Z')) > HARDWARE_GROUND_Z_M;
     }
 
     copter_set_speed(args) {
