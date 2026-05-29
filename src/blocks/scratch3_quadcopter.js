@@ -87,6 +87,13 @@ const HARDWARE_LONG_TARGET_COMMAND_TIMEOUT_MS = 120000;
 const HARDWARE_POS_TOL_M = 0.07;
 /** Upper bound on block wait beyond nominal HL trajectory (radio + planner). */
 const HARDWARE_HL_EXTRA_WAIT_MS = 650;
+/** VM target commands that enqueue firmware HL trajectories (takeoff / land / go_to). */
+const HL_TARGET_COMMAND_KEYS = new Set([
+    'copter_fly_up',
+    'copter_land',
+    'copter_fly_distance',
+    'copter_fly_to_coords'
+]);
 /** Do not start horizontal flight when voltage is already in the observed drop zone. */
 const HARDWARE_MIN_FLIGHT_VBAT = 3.05;
 /** Altitude above which hover-hold is safe on project stop (matches {@link copter_is_flying}). */
@@ -137,8 +144,14 @@ class Scratch3QuadcopterBlocks {
         this.CopterLANDING = null;
         this._simTimeouts = new Set();
         this.commandCoordinator = new QuadcopterCommandCoordinator({
-            onFlightCleanup: (reason) => {
+            onFlightCleanup: (reason, command) => {
                 if (!this.runtime || !this.runtime.QCA) return;
+                const key = command && command.key;
+                if (key && HL_TARGET_COMMAND_KEYS.has(key) &&
+                    typeof this.runtime.QCA.abortHlTrajectories === 'function') {
+                    this.runtime.QCA.abortHlTrajectories(reason);
+                    return;
+                }
                 if (typeof this.runtime.QCA.softStopStreaming === 'function') {
                     this.runtime.QCA.softStopStreaming(reason);
                 } else if (typeof this.runtime.QCA.hoverStop === 'function') {
@@ -496,6 +509,22 @@ class Scratch3QuadcopterBlocks {
         return Math.max(Math.abs(Number(this.speed)) || 0, 0.12);
     }
 
+    /**
+     * HL takeoff/land/go_to holds the flight gate; velocity blocks must yield until it is released.
+     * @param {object} util
+     * @returns {boolean} true when streaming commands may start
+     */
+    _yieldUntilVelocityStreamingReady(util) {
+        if (!this.runtime.QCA || typeof this.runtime.QCA.canAcceptVelocityStreaming !== 'function') {
+            return true;
+        }
+        if (this.runtime.QCA.canAcceptVelocityStreaming()) {
+            return true;
+        }
+        util.yield();
+        return false;
+    }
+
     _shortestYawDeltaDeg(fromDeg, toDeg) {
         const from = Number(fromDeg);
         const to = Number(toDeg);
@@ -720,6 +749,10 @@ class Scratch3QuadcopterBlocks {
             isDone: () => {
                 if (!this.runtime.QCA.isQuadcopterConnected()) {
                     return true;
+                }
+                if (typeof this.runtime.QCA.isHlTrajectoryIdle === 'function' &&
+                    !this.runtime.QCA.isHlTrajectoryIdle()) {
+                    return false;
                 }
                 const nowZ = Number(this.runtime.QCA.get_coord("Z"));
                 // HL takeoff may use a higher absolute target than `this.z` when telemetry Z is stale
@@ -1567,6 +1600,9 @@ class Scratch3QuadcopterBlocks {
         }
 
         // --- Hardware path ---
+        if (!this._yieldUntilVelocityStreamingReady(util)) {
+            return;
+        }
         const rotateOwnerId = util.thread && util.thread.topBlock
             ? String(util.thread.topBlock)
             : '';

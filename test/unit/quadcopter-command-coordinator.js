@@ -46,9 +46,9 @@ test('coordinator: only owner thread continues active command', t => {
 });
 
 test('coordinator: replaced command triggers soft cleanup hook', t => {
-    const cleanupReasons = [];
+    const cleanupCalls = [];
     const coordinator = new QuadcopterCommandCoordinator({
-        onFlightCleanup: reason => cleanupReasons.push(reason)
+        onFlightCleanup: (reason, command) => cleanupCalls.push({ reason, key: command && command.key })
     });
 
     const util = makeUtil('hatA');
@@ -67,7 +67,9 @@ test('coordinator: replaced command triggers soft cleanup hook', t => {
         cancel: () => {}
     });
 
-    t.deepEqual(cleanupReasons, ['replaced']);
+    t.equal(cleanupCalls.length, 1);
+    t.equal(cleanupCalls[0].reason, 'replaced');
+    t.equal(cleanupCalls[0].key, 'cmd_a');
     t.equal(coordinator.activeCommand.key, 'cmd_b');
     t.end();
 });
