@@ -49,8 +49,8 @@ const COPTER_TURN_SIDE_MSG = {
 
 const COPTER_TURN_SIDE_LABELS_BY_LOCALE = {
     ru: {
-        left: 'налево',
-        right: 'направо'
+        left: 'влево',
+        right: 'вправо'
     },
     en: {
         left: 'left',
@@ -76,9 +76,8 @@ const SIM_POS_TOLERANCE = 0.004;
 const SIM_YAW_TOLERANCE = 2.5;
 
 /**
- * Полёт по железу: в воздухе используем velocity setpoints + hoverStop (как cflib MotionCommander).
- * Исключение: copter_land на железе — один вызов HL land в сессии (как cfclient).
- * @see https://www.bitcraze.io/documentation/repository/crazyflie-firmware/master/functional-areas/sensor-to-control/commanders_setpoints/
+ * Полёт по железу: velocity setpoints — в **системе координат корпуса** (cflib send_hover_setpoint).
+ * HL go_to(relative) — смещение тоже в body frame. Yaw из телеметрии — только для отображения и absolute go_to.
  */
 const HARDWARE_YAW_RATE_DPS = 72;
 /** Ожидание isDone по телеметрии — верхняя граница (секунды полёта редко дольше). */
@@ -505,6 +504,37 @@ class Scratch3QuadcopterBlocks {
         if (d > 180) d -= 360;
         if (d < -180) d += 360;
         return d;
+    }
+
+    /** Body-relative direction (deg) → velocity for legacy hover/velocity setpoints (m/s). */
+    _hardwareBodyVelocity(speed, dirDeg) {
+        const rad = Number(dirDeg) * Math.PI / 180;
+        const s = Number(speed);
+        return {
+            vx: s * Math.cos(rad),
+            vy: s * Math.sin(rad)
+        };
+    }
+
+    /** Body-relative direction (m) → offset for HL go_to(relative). */
+    _hardwareBodyOffsetMeters(meters, dirDeg) {
+        const rad = Number(dirDeg) * Math.PI / 180;
+        const m = Number(meters);
+        return {
+            bdx: m * Math.cos(rad),
+            bdy: m * Math.sin(rad)
+        };
+    }
+
+    /** Body XY offset rotated into Crazyflie world frame (m). */
+    _hardwareWorldDeltaFromBody(bdx, bdy, yawDeg) {
+        const yawRad = Number(yawDeg) * Math.PI / 180;
+        const c = Math.cos(yawRad);
+        const s = Math.sin(yawRad);
+        return {
+            dx: bdx * c - bdy * s,
+            dy: bdx * s + bdy * c
+        };
     }
 
     _getHardwareBatterySnapshot() {
@@ -998,10 +1028,9 @@ class Scratch3QuadcopterBlocks {
                 const lowBattery = Number.isFinite(battery.vbat) &&
                     battery.vbat > 0 &&
                     battery.vbat < HARDWARE_MIN_FLIGHT_VBAT;
-                // Body-relative movement in world frame: same convention as velocity blocks (yaw + dir).
-                const headingRad = (Number(this.yaw) + Number(this.dir)) * Math.PI / 180;
-                const dx = meters * Math.cos(headingRad);
-                const dy = meters * Math.sin(headingRad);
+                // HL go_to(relative): dx/dy in body frame (cflib MotionCommander convention).
+                const {bdx, bdy} = this._hardwareBodyOffsetMeters(meters, this.dir);
+                const {dx, dy} = this._hardwareWorldDeltaFromBody(bdx, bdy, this.yaw);
                 const tx = this.x + dx;
                 const ty = this.y + dy;
                 const tz = Number(this.runtime.QCA.get_coord('Z'));
@@ -1012,7 +1041,7 @@ class Scratch3QuadcopterBlocks {
                 const yawRad = 0;
                 const deadlineMs = Date.now() + durationS * 1000 + HARDWARE_HL_EXTRA_WAIT_MS;
                 return {
-                    dx, dy, tx, ty, tz, yawRad, durationS, deadlineMs,
+                    dx: bdx, dy: bdy, tx, ty, tz, yawRad, durationS, deadlineMs,
                     startX: this.x, startY: this.y, startZ: this.z, battery, lowBattery,
                     hlScheduled: false,
                     doneLogged: false
@@ -1115,8 +1144,7 @@ class Scratch3QuadcopterBlocks {
             start: () => {
                 this.init_start_coordinates();
                 this.z = Number(this.runtime.QCA.get_coord("Z"));
-                const vx = this.speed * Math.cos((this.yaw + this.dir) * Math.PI / 180);
-                const vy = this.speed * Math.sin((this.yaw + this.dir) * Math.PI / 180);
+                const {vx, vy} = this._hardwareBodyVelocity(this.speed, this.dir);
                 this.runtime.QCA.move_with_speed(vx, vy, 0, this.z);
             },
             finish: () => {
@@ -1457,9 +1485,10 @@ class Scratch3QuadcopterBlocks {
         const moveVel = typeof this.runtime.QCA.getFlightMoveVelocityMps === 'function'
             ? this.runtime.QCA.getFlightMoveVelocityMps()
             : 0.5;
+        const snap = this.runtime.QCA.getTelemetrySnapshot();
         const yawRad = typeof this.runtime.QCA.telemetryYawToHeadingRad === 'function'
-            ? this.runtime.QCA.telemetryYawToHeadingRad(Number(this.runtime.QCA.get_coord('W')))
-            : Number(this.runtime.QCA.get_coord('W'));
+            ? this.runtime.QCA.telemetryYawToHeadingRad(Number(snap && snap.yaw))
+            : 0;
 
         if (pathLen < 1e-6) {
             return this._runHardwareTimedCommand('copter_fly_to_coords', util, {
@@ -1538,22 +1567,47 @@ class Scratch3QuadcopterBlocks {
         }
 
         // --- Hardware path ---
-        this.init_start_coordinates();
-        const deltaDeg = signedDeg;
-        const startW = this.yaw;
-        const targetW = this._castYawTo360(startW + deltaDeg);
-        const turn = this._shortestYawDeltaDeg(startW, targetW);
-        const durationMs = (Math.abs(turn) / HARDWARE_YAW_RATE_DPS) * 1000;
-        const yawRate = Math.abs(turn) < 1e-3 ? 0 : Math.sign(turn) * HARDWARE_YAW_RATE_DPS;
+        const rotateOwnerId = util.thread && util.thread.topBlock
+            ? String(util.thread.topBlock)
+            : '';
+        const activeRotate = this.commandCoordinator.activeCommand;
+        const rotateInProgress = activeRotate &&
+            activeRotate.key === 'copter_rotate' &&
+            activeRotate.ownerId === rotateOwnerId;
+        if (!rotateInProgress) {
+            this.init_start_coordinates();
+            const startW = this.yaw;
+            const targetW = this._castYawTo360(startW + signedDeg);
+            const turn = this._shortestYawDeltaDeg(startW, targetW);
+            const durationMs = (Math.abs(turn) / HARDWARE_YAW_RATE_DPS) * 1000;
+            const yawRate = Math.abs(turn) < 1e-3 ? 0 : Math.sign(turn) * HARDWARE_YAW_RATE_DPS;
+            this._hwRotatePlan = {
+                ownerId: rotateOwnerId,
+                side,
+                signedDeg,
+                startW,
+                targetW,
+                turn,
+                durationMs,
+                yawRate
+            };
+        }
+        const plan = this._hwRotatePlan;
+        if (!plan) return;
         return this._runHardwareTimedCommand('copter_rotate', util, {
-            durationMs,
+            durationMs: plan.durationMs,
             start: () => {
-                this.z = Number(this.runtime.QCA.get_coord("Z"));
-                this.runtime.QCA.move_with_speed(0, 0, yawRate, this.z);
+                this.z = Number(this.runtime.QCA.get_coord('Z'));
+                this.runtime.QCA.move_with_speed(0, 0, plan.yawRate, this.z);
+                return plan;
             },
             finish: () => {
                 this.runtime.QCA.hoverStop();
                 this.init_start_coordinates();
+                this._hwRotatePlan = null;
+            },
+            cancel: () => {
+                this._hwRotatePlan = null;
             }
         });
     }
@@ -1709,10 +1763,17 @@ class Scratch3QuadcopterBlocks {
     }
 
     init_start_coordinates() {
-        this.yaw = Number(this.runtime.QCA.get_coord("W"));
-        this.x = Number(this.runtime.QCA.get_coord("X"));
-        this.y = Number(this.runtime.QCA.get_coord("Y"));
-        this.z = Number(this.runtime.QCA.get_coord("Z"));
+        const snap = this.runtime.QCA.getTelemetrySnapshot();
+        const yawRad = Number(snap && snap.yaw);
+        const xRaw = Number(this.runtime.QCA.get_coord("X"));
+        const yRaw = Number(this.runtime.QCA.get_coord("Y"));
+        const zRaw = Number(this.runtime.QCA.get_coord("Z"));
+        this.yaw = typeof this.runtime.QCA.telemetryYawToDegrees === 'function'
+            ? this.runtime.QCA.telemetryYawToDegrees(yawRad)
+            : yawRad * 180 / Math.PI;
+        this.x = xRaw;
+        this.y = yRaw;
+        this.z = zRaw;
     }
 }
 
