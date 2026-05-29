@@ -341,44 +341,57 @@ class Scratch3QuadcopterBlocks {
         this._simTimeouts.clear();
     }
 
-  /**
-   * True when stop-all should engage hover-hold (in air / active flight), not on the ground.
-   * greenFlag() always calls stopAll() first; hover on idle craft causes a small lift.
-   */
-    _shouldHoverHoldOnProjectStop() {
-        if (!this.runtime || !this.runtime.QCA) return false;
+    /**
+     * greenFlag() always calls stopAll() first. On a grounded copter, hoverStop and
+     * notify_setpoint_stop both disturb the commander; skip radio commands when idle on deck.
+     * @returns {'hover'|'stop'|'none'}
+     */
+    _getHardwareStopActionOnProjectStop() {
+        if (!this.runtime || !this.runtime.QCA) return 'none';
         if (typeof this.runtime.QCA.isQuadcopterConnected !== 'function' ||
             !this.runtime.QCA.isQuadcopterConnected()) {
-            return false;
+            return 'none';
         }
-        if (this.commandCoordinator.activeCommand) return true;
-        if (this.fack !== 0) return true;
+
+        const z = Number(this.runtime.QCA.get_coord('Z'));
+        const inAir = Number.isFinite(z) && z > HARDWARE_GROUND_Z_M;
+        const streaming = typeof this.runtime.QCA.isStreamingSetpoints === 'function' &&
+            this.runtime.QCA.isStreamingSetpoints();
+
+        if (streaming) {
+            return inAir ? 'hover' : 'stop';
+        }
+
+        if (!inAir) {
+            return 'none';
+        }
 
         const snap = typeof this.runtime.QCA.getStatusSnapshot === 'function'
             ? this.runtime.QCA.getStatusSnapshot()
             : null;
-        if (snap && snap.flightState === 'commandActive') return true;
+        if (snap && snap.flightState === 'landing') {
+            return 'stop';
+        }
 
-        const z = Number(this.runtime.QCA.get_coord('Z'));
-        return Number.isFinite(z) && z > HARDWARE_GROUND_Z_M;
+        return 'hover';
     }
 
     _onProjectStopAll() {
         this._simClearInterval();
         this._simClearAllTimeouts();
-        const hoverHold = this._shouldHoverHoldOnProjectStop();
+        const stopAction = this._getHardwareStopActionOnProjectStop();
         this.commandCoordinator.cancel('projectStopAll');
         this._clearHardwareCommandIntervals();
         try {
             if (this.runtime && this.runtime.QCA) {
                 if (typeof this.runtime.QCA.isQuadcopterConnected === 'function' &&
                     this.runtime.QCA.isQuadcopterConnected()) {
-                    if (hoverHold && typeof this.runtime.QCA.hoverStop === 'function') {
+                    if (stopAction === 'hover' &&
+                        typeof this.runtime.QCA.hoverStop === 'function') {
                         this.runtime.QCA.hoverStop();
-                    } else if (typeof this.runtime.QCA.stopCommands === 'function') {
+                    } else if (stopAction === 'stop' &&
+                        typeof this.runtime.QCA.stopCommands === 'function') {
                         this.runtime.QCA.stopCommands('projectStopAll');
-                    } else if (typeof this.runtime.QCA.disconnect === 'function') {
-                        this.runtime.QCA.disconnect('projectStopAll');
                     }
                 } else if (typeof this.runtime.QCA.stopCommands === 'function') {
                     this.runtime.QCA.stopCommands('projectStopAll');
