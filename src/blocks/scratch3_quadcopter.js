@@ -22,16 +22,33 @@ const COPTER_DIR_DEGREES = {
 /** Fallback when VM locale map lacks scratch_msgs (GUI merges ScratchMsgs in blocks.jsx). */
 const COPTER_DIR_LABELS_BY_LOCALE = {
     ru: {
-        forward: 'Вперёд',
-        backward: 'Назад',
-        left: 'Налево',
-        right: 'Направо'
+        forward: 'вперёд',
+        backward: 'назад',
+        left: 'налево',
+        right: 'направо'
     },
     en: {
-        forward: 'Forward',
-        backward: 'Backward',
-        left: 'Left',
-        right: 'Right'
+        forward: 'forward',
+        backward: 'backward',
+        left: 'left',
+        right: 'right'
+    }
+};
+
+/** Turn side labels for copter_rotate / copter_turn_sides (scratch-l10n + fallback). */
+const COPTER_TURN_SIDE_MSG = {
+    left: {id: 'COPTER_TURN_SIDE_LEFT', default: 'left'},
+    right: {id: 'COPTER_TURN_SIDE_RIGHT', default: 'right'}
+};
+
+const COPTER_TURN_SIDE_LABELS_BY_LOCALE = {
+    ru: {
+        left: 'налево',
+        right: 'направо'
+    },
+    en: {
+        left: 'left',
+        right: 'right'
     }
 };
 
@@ -150,7 +167,8 @@ class Scratch3QuadcopterBlocks {
             copter_direction: this.copter_direction,
             copter_battery: this.copter_battery,
             copter_is_flying: this.copter_is_flying,
-            copter_set_speed: this.copter_set_speed
+            copter_set_speed: this.copter_set_speed,
+            copter_speed: this.copter_speed
         };
     }
 
@@ -1303,6 +1321,10 @@ class Scratch3QuadcopterBlocks {
     }
 
     copter_rotate(args, util) {
+        const magnitude = Math.abs(Number(args.DEGREES));
+        const side = this._normalizeTurnSide(args.SIDE);
+        const signedDeg = side === 'left' ? -magnitude : magnitude;
+
         if (this.runtime.sim_copter_ac) {
             if (!this._ensureSimCopterSprite(util)) return;
             if (this.fack === 0) {
@@ -1310,7 +1332,7 @@ class Scratch3QuadcopterBlocks {
                 if (!this._simCanExecuteAirCommand()) return;
             }
             if (this.fack === 0) {
-                this._sim_target_yaw = this._castYawTo360(this.sim_yaw + Number(args.DEGREES));
+                this._sim_target_yaw = this._castYawTo360(this.sim_yaw + signedDeg);
                 this._simStartMoveToCoord(this.sim_x, this.sim_y, this.sim_z, this._sim_target_yaw);
                 this.yielded_time_start = Date.now();
                 this.fack = 1;
@@ -1331,7 +1353,7 @@ class Scratch3QuadcopterBlocks {
 
         // --- Hardware path ---
         this.init_start_coordinates();
-        const deltaDeg = Number(args.DEGREES);
+        const deltaDeg = signedDeg;
         const startW = this.yaw;
         const targetW = this._castYawTo360(startW + deltaDeg);
         const turn = this._shortestYawDeltaDeg(startW, targetW);
@@ -1359,6 +1381,40 @@ class Scratch3QuadcopterBlocks {
      * @param {*} raw dropdown value, localized label, or legacy direction_* key
      * @returns {'forward'|'backward'|'left'|'right'}
      */
+    /**
+     * @param {*} raw dropdown value, localized label, or legacy turn-side text
+     * @returns {'left'|'right'}
+     */
+    _normalizeTurnSide(raw) {
+        if (raw === undefined || raw === null || raw === '') {
+            return 'right';
+        }
+        const s = Cast.toString(raw);
+        if (s === 'left' || s === 'right') {
+            return s;
+        }
+        if (s === 'влево' || s === 'налево' || s === 'Налево') {
+            return 'left';
+        }
+        if (s === 'вправо' || s === 'направо' || s === 'Направо') {
+            return 'right';
+        }
+        for (const key of Object.keys(COPTER_TURN_SIDE_MSG)) {
+            if (s === formatMessage(COPTER_TURN_SIDE_MSG[key]) || s === COPTER_TURN_SIDE_MSG[key].default) {
+                return key;
+            }
+        }
+        for (const locale of Object.keys(COPTER_TURN_SIDE_LABELS_BY_LOCALE)) {
+            const table = COPTER_TURN_SIDE_LABELS_BY_LOCALE[locale];
+            for (const key of Object.keys(table)) {
+                if (s === table[key]) {
+                    return key;
+                }
+            }
+        }
+        return 'right';
+    }
+
     _normalizeDirectionArg(raw) {
         const s = Cast.toString(raw);
         const legacy = {
@@ -1368,6 +1424,17 @@ class Scratch3QuadcopterBlocks {
             direction_right: 'right'
         };
         if (legacy[s]) return legacy[s];
+        const legacyLabels = {
+            'Вперёд': 'forward',
+            'Назад': 'backward',
+            'Налево': 'left',
+            'Направо': 'right',
+            Forward: 'forward',
+            Backward: 'backward',
+            Left: 'left',
+            Right: 'right'
+        };
+        if (legacyLabels[s]) return legacyLabels[s];
         if (Object.prototype.hasOwnProperty.call(COPTER_DIR_DEGREES, s)) return s;
         for (const key of Object.keys(COPTER_DIR_MSG)) {
             if (s === formatMessage(COPTER_DIR_MSG[key]) || s === COPTER_DIR_MSG[key].default) {
@@ -1436,6 +1503,11 @@ class Scratch3QuadcopterBlocks {
         if (Number.isFinite(s) && s > 0) {
             this.speed = s;
         }
+    }
+
+    copter_speed() {
+        const s = Number(this.speed);
+        return Number.isFinite(s) ? s : 0;
     }
 
     init_start_coordinates() {
