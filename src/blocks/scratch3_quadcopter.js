@@ -9,7 +9,9 @@ const COPTER_DIR_MSG = {
     forward: { id: 'COPTER_DIRECTION_FORWARD', default: 'Forward' },
     backward: { id: 'COPTER_DIRECTION_BACKWARD', default: 'Backward' },
     left: { id: 'COPTER_DIRECTION_LEFT', default: 'Left' },
-    right: { id: 'COPTER_DIRECTION_RIGHT', default: 'Right' }
+    right: { id: 'COPTER_DIRECTION_RIGHT', default: 'Right' },
+    up: { id: 'COPTER_DIRECTION_UP', default: 'up' },
+    down: { id: 'COPTER_DIRECTION_DOWN', default: 'down' }
 };
 
 const COPTER_DIR_DEGREES = {
@@ -25,13 +27,17 @@ const COPTER_DIR_LABELS_BY_LOCALE = {
         forward: 'вперёд',
         backward: 'назад',
         left: 'налево',
-        right: 'направо'
+        right: 'направо',
+        up: 'вверх',
+        down: 'вниз'
     },
     en: {
         forward: 'forward',
         backward: 'backward',
         left: 'left',
-        right: 'right'
+        right: 'right',
+        up: 'up',
+        down: 'down'
     }
 };
 
@@ -104,6 +110,7 @@ class Scratch3QuadcopterBlocks {
         this.yaw = this.runtime.QCA.get_coord("W");
         this.noww = 0;
         this.dir = 0;
+        this.flightDirKey = 'forward';
         this.fack = 0;
         this.delta = 0.01;
         this.speed = 1;
@@ -796,9 +803,136 @@ class Scratch3QuadcopterBlocks {
         return (this.runtime.QCA.isQuadcopterConnected());
     }
 
+    _isVerticalFlightDirection(dirKey) {
+        return dirKey === 'up' || dirKey === 'down';
+    }
+
+    _resolveFlightDirectionFromArgs(args) {
+        if (args.DIRECTION !== undefined) {
+            return this._normalizeDirectionArg(args.DIRECTION);
+        }
+        return this.flightDirKey || 'forward';
+    }
+
+    _copterFlyDistanceVertical(dirKey, meters, util) {
+        const dz = dirKey === 'up' ? Number(meters) : -Number(meters);
+        if (this.runtime.sim_copter_ac) {
+            if (!this._ensureSimCopterSprite(util)) return;
+            if (this.fack === 0) {
+                this._syncFromSpritePositionIfNeeded();
+                if (!this._simCanExecuteAirCommand()) return;
+            }
+            if (this.fack === 0) {
+                this._sim_target_z = Math.max(0, this.sim_z + dz);
+                this._simStartMoveToCoord(this.sim_x, this.sim_y, this._sim_target_z, this.sim_yaw);
+                this.yielded_time_start = Date.now();
+                this.fack = 1;
+                util.yield();
+                return;
+            } else if (this.fack !== 2) {
+                if ((Date.now() - this.yielded_time_start) >= this.yielded_max_time) this.fack = 2;
+                if (this._simIsAtTarget(this.sim_x, this.sim_y, this._sim_target_z, this.sim_yaw)) this.fack = 2;
+                util.yield();
+                return;
+            }
+            this._simClearInterval();
+            this.sim_z = this._sim_target_z;
+            this._simApplyState();
+            this.fack = 0;
+            return;
+        }
+
+        if (Math.abs(dz) < 1e-6) {
+            return this._runHardwareTimedCommand('copter_fly_distance', util, {
+                durationMs: 1,
+                start: () => { },
+                finish: () => this.init_start_coordinates()
+            });
+        }
+
+        return this._runHardwareTargetCommand('copter_fly_distance', util, {
+            prepare: () => {
+                this.init_start_coordinates();
+                this.z = Math.max(0, this.z + dz);
+            },
+            dispatch: () => {
+                this.runtime.QCA.move_with_speed(0, 0, 0, this.z);
+            },
+            isDone: () => {
+                this.nowz = Number(this.runtime.QCA.get_coord('Z'));
+                return Math.abs(this.nowz - this.z) < this.delta;
+            },
+            finish: () => {
+                this.runtime.QCA.hoverStop();
+                this.init_start_coordinates();
+            }
+        });
+    }
+
+    _copterFlyTimeVertical(dirKey, seconds, util) {
+        const durationMs = Math.max(0, Number(seconds)) * 1000;
+        if (durationMs <= 0) {
+            return;
+        }
+        const sign = dirKey === 'up' ? 1 : -1;
+
+        if (this.runtime.sim_copter_ac) {
+            if (!this._ensureSimCopterSprite(util)) return;
+            if (this.fack === 0) {
+                this._syncFromSpritePositionIfNeeded();
+                if (!this._simCanExecuteAirCommand()) return;
+            }
+            if (this.fack === 0) {
+                const vz = sign * SIM_MOVE_SPEED;
+                this._simClearInterval();
+                this.sim_interval = setInterval(() => {
+                    this.sim_z += vz * (SIM_STEP_MS / 1000);
+                    if (this.sim_z < 0) this.sim_z = 0;
+                    this._simApplyState();
+                }, SIM_STEP_MS);
+                this.fack = 1;
+                this._simAddTimeout(() => {
+                    this.fack = 2;
+                }, durationMs);
+                util.yield();
+                return;
+            } else if (this.fack !== 2) {
+                util.yield();
+                return;
+            }
+            this._simClearInterval();
+            this._simApplyState();
+            this.fack = 0;
+            return;
+        }
+
+        return this._runHardwareTimedCommand('copter_fly_time', util, {
+            durationMs,
+            start: () => {
+                this.init_start_coordinates();
+                this.z = Number(this.runtime.QCA.get_coord('Z')) + sign * this.speed * Number(seconds);
+                if (this.z < 0) this.z = 0;
+                this.runtime.QCA.move_with_speed(0, 0, 0, this.z);
+            },
+            finish: () => {
+                this.runtime.QCA.hoverStop();
+                this.init_start_coordinates();
+            }
+        });
+    }
+
     copter_fly_distance(args, util) {
         if (this.fack === 0 && args.DIRECTION !== undefined) {
-            this._applyDirectionKey(this._normalizeDirectionArg(args.DIRECTION));
+            const dirKey = this._normalizeDirectionArg(args.DIRECTION);
+            if (this._isVerticalFlightDirection(dirKey)) {
+                this.flightDirKey = dirKey;
+            } else {
+                this._applyDirectionKey(dirKey);
+            }
+        }
+        const activeDirKey = this._resolveFlightDirectionFromArgs(args);
+        if (this._isVerticalFlightDirection(activeDirKey)) {
+            return this._copterFlyDistanceVertical(activeDirKey, args.METERS, util);
         }
         if (this.runtime.sim_copter_ac) {
             if (!this._ensureSimCopterSprite(util)) return;
@@ -918,7 +1052,16 @@ class Scratch3QuadcopterBlocks {
 
     copter_fly_time(args, util) {
         if (this.fack === 0 && args.DIRECTION !== undefined) {
-            this._applyDirectionKey(this._normalizeDirectionArg(args.DIRECTION));
+            const dirKey = this._normalizeDirectionArg(args.DIRECTION);
+            if (this._isVerticalFlightDirection(dirKey)) {
+                this.flightDirKey = dirKey;
+            } else {
+                this._applyDirectionKey(dirKey);
+            }
+        }
+        const activeDirKey = this._resolveFlightDirectionFromArgs(args);
+        if (this._isVerticalFlightDirection(activeDirKey)) {
+            return this._copterFlyTimeVertical(activeDirKey, args.SECONDS, util);
         }
         if (this.runtime.sim_copter_ac) {
             if (!this._ensureSimCopterSprite(util)) return;
@@ -1408,10 +1551,6 @@ class Scratch3QuadcopterBlocks {
     }
 
     /**
-     * @param {*} raw dropdown value, localized label, or legacy direction_* key
-     * @returns {'forward'|'backward'|'left'|'right'}
-     */
-    /**
      * @param {*} raw dropdown value, localized label, or legacy turn-side text
      * @returns {'left'|'right'}
      */
@@ -1445,13 +1584,19 @@ class Scratch3QuadcopterBlocks {
         return 'right';
     }
 
+    /**
+     * @param {*} raw dropdown value, localized label, or legacy direction_* key
+     * @returns {'forward'|'backward'|'left'|'right'|'up'|'down'}
+     */
     _normalizeDirectionArg(raw) {
         const s = Cast.toString(raw);
         const legacy = {
             direction_forward: 'forward',
             direction_backward: 'backward',
             direction_left: 'left',
-            direction_right: 'right'
+            direction_right: 'right',
+            direction_up: 'up',
+            direction_down: 'down'
         };
         if (legacy[s]) return legacy[s];
         const legacyLabels = {
@@ -1459,13 +1604,18 @@ class Scratch3QuadcopterBlocks {
             'Назад': 'backward',
             'Налево': 'left',
             'Направо': 'right',
+            'Вверх': 'up',
+            'Вниз': 'down',
             Forward: 'forward',
             Backward: 'backward',
             Left: 'left',
-            Right: 'right'
+            Right: 'right',
+            Up: 'up',
+            Down: 'down'
         };
         if (legacyLabels[s]) return legacyLabels[s];
         if (Object.prototype.hasOwnProperty.call(COPTER_DIR_DEGREES, s)) return s;
+        if (s === 'up' || s === 'down') return s;
         for (const key of Object.keys(COPTER_DIR_MSG)) {
             if (s === formatMessage(COPTER_DIR_MSG[key]) || s === COPTER_DIR_MSG[key].default) {
                 return key;
@@ -1481,6 +1631,7 @@ class Scratch3QuadcopterBlocks {
     }
 
     _applyDirectionKey(key) {
+        this.flightDirKey = key;
         this.dir = COPTER_DIR_DEGREES[key] !== undefined ? COPTER_DIR_DEGREES[key] : 0;
     }
 
@@ -1493,7 +1644,8 @@ class Scratch3QuadcopterBlocks {
     }
 
     _dirLabelFromKey(key) {
-        const msgDef = COPTER_DIR_MSG[key] || COPTER_DIR_MSG.forward;
+        const resolvedKey = COPTER_DIR_MSG[key] ? key : 'forward';
+        const msgDef = COPTER_DIR_MSG[resolvedKey];
         const viaFormat = formatMessage(msgDef);
         if (viaFormat !== msgDef.default) {
             return viaFormat;
@@ -1504,7 +1656,10 @@ class Scratch3QuadcopterBlocks {
     }
 
     copter_direction() {
-        return this._dirLabelFromKey(this._dirKeyFromDegrees(this.dir));
+        const key = this.flightDirKey && COPTER_DIR_MSG[this.flightDirKey]
+            ? this.flightDirKey
+            : this._dirKeyFromDegrees(this.dir);
+        return this._dirLabelFromKey(key);
     }
 
     copter_change_axis_by(args, util) {
