@@ -820,17 +820,14 @@ class Scratch3QuadcopterBlocks {
                 const estimateMs = typeof this.runtime.QCA.computeHlLandWaitMs === 'function'
                     ? this.runtime.QCA.computeHlLandWaitMs()
                     : 4000;
+                this.runtime.QCA.landAndClose();
                 return {
-                    hlScheduled: false,
+                    hlScheduled: true,
                     landBlockDeadlineMs: Date.now() + estimateMs
                 };
             },
-            dispatch: (context) => {
-                if (context.hlScheduled) {
-                    return;
-                }
-                context.hlScheduled = true;
-                this.runtime.QCA.landAndClose();
+            dispatch: () => {
+                // HL land dispatched in prepare — avoid 200ms gap before handoff.
             },
             isDone: (context, elapsedMs) => {
                 if (!this.runtime.QCA.isQuadcopterConnected()) {
