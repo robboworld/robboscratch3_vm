@@ -15,6 +15,8 @@ const {
     simSensorDebugRayLengthStageUnits
 } = require('../robot/sim-sensor-probes');
 
+const SIM_ROBOT_SPRITE_NAMES = ['Robbo Robot', 'Robbo Platform', 'RobboPlatform'];
+
 class Scratch3RobotBlocks {
     constructor (runtime) {
         /**
@@ -251,7 +253,7 @@ class Scratch3RobotBlocks {
     const hasValidLastUtil = !!(effectiveUtil && effectiveUtil.target && typeof effectiveUtil.target.direction !== "undefined");
     if (!hasValidLastUtil) {
       const robotTarget = this.runtime && Array.isArray(this.runtime.targets)
-        ? this.runtime.targets.find(t => !t.isStage && t.sprite && t.sprite.name === 'Robbo Robot')
+        ? this.runtime.targets.find(t => !t.isStage && t.sprite && SIM_ROBOT_SPRITE_NAMES.includes(t.sprite.name))
         : null;
       if (robotTarget) {
         effectiveUtil = {target: robotTarget};
@@ -265,8 +267,7 @@ class Scratch3RobotBlocks {
 
   getSimTarget (util) {
     if (!this.runtime.sim_ac) return util.target;
-    const names = ['Robbo Robot', 'RobboPlatform', 'Robot'];
-    const robot = this.runtime.targets.find(t => !t.isStage && t.sprite && names.includes(t.sprite.name));
+    const robot = this.runtime.targets.find(t => !t.isStage && t.sprite && SIM_ROBOT_SPRITE_NAMES.includes(t.sprite.name));
     if (!robot) {
       this.runtime.sim_ac = false;
       this.runtime.going = false;
@@ -280,8 +281,7 @@ class Scratch3RobotBlocks {
 
   getSimSensorDebugData () {
     if (!this.runtime || !this.runtime.sim_ac) return [];
-    const names = ['Robbo Robot', 'RobboPlatform', 'Robot'];
-    const robot = this.runtime.targets.find(t => !t.isStage && t.sprite && names.includes(t.sprite.name));
+    const robot = this.runtime.targets.find(t => !t.isStage && t.sprite && SIM_ROBOT_SPRITE_NAMES.includes(t.sprite.name));
     if (!robot) {
       this.runtime.sim_ac = false;
       this.runtime.emit('ROBBO_SIM_SPRITES_INVALIDATED', {robot: true, copter: false});

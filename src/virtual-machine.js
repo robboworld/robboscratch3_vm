@@ -438,7 +438,7 @@ class VirtualMachine extends EventEmitter {
 
     _hasSimulationRobotSprite () {
         if (!this.runtime || !this.runtime.targets) return false;
-        const names = ['Robbo Robot', 'RobboPlatform', 'Robot'];
+        const names = ['Robbo Robot', 'Robbo Platform', 'RobboPlatform'];
         return this.runtime.targets.some(t =>
             t.isOriginal && !t.isStage && names.includes(t.sprite.name)
         );
