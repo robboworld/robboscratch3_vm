@@ -176,7 +176,7 @@ class Scratch3QuadcopterBlocks {
             copter_change_x_by: this.copter_change_x_by,
             copter_change_y_by: this.copter_change_y_by,
             copter_change_z_by: this.copter_change_z_by,
-            copter_change_axis_by: this.copter_change_axis_by,
+            copter_move_axis_to: this.copter_move_axis_to,
             copter_x_coord: this.copter_x_coord,
             copter_y_coord: this.copter_y_coord,
             copter_z_coord: this.copter_z_coord,
@@ -1470,44 +1470,50 @@ class Scratch3QuadcopterBlocks {
         });
     }
 
-    copter_fly_to_coords(args, util) {
-        if (this.runtime.sim_copter_ac) {
-            if (!this._ensureSimCopterSprite(util)) return;
-            if (this.fack === 0) {
-                this._syncFromSpritePositionIfNeeded();
-                if (!this._simCanExecuteAirCommand()) return;
-            }
-            if (this.fack === 0) {
-                this._sim_target_x = Number(args.X_COORD);
-                this._sim_target_y = Number(args.Y_COORD) * -1;
-                this._sim_target_z = Math.max(0, Number(args.Z_COORD));
-                this._simStartMoveToCoord(this._sim_target_x, this._sim_target_y, this._sim_target_z, this.sim_yaw);
-                this.yielded_time_start = Date.now();
-                this.fack = 1;
-                util.yield();
-                return;
-            } else if (this.fack !== 2) {
-                if ((Date.now() - this.yielded_time_start) >= this.yielded_max_time) this.fack = 2;
-                if (this._simIsAtTarget(this._sim_target_x, this._sim_target_y, this._sim_target_z, this.sim_yaw)) this.fack = 2;
-                util.yield();
-                return;
-            }
-            this._simClearInterval();
-            this.sim_x = this._sim_target_x;
-            this.sim_y = this._sim_target_y;
-            this.sim_z = this._sim_target_z;
-            this._simApplyState();
-            this.fack = 0;
+    /**
+     * Sim path: animate toward resolved world targets (tx, ty, tz).
+     * @param {number} tx
+     * @param {number} ty
+     * @param {number} tz
+     * @param {object} util
+     */
+    _simFlyToResolvedTargets(tx, ty, tz, util) {
+        if (!this._ensureSimCopterSprite(util)) return;
+        if (this.fack === 0) {
+            this._syncFromSpritePositionIfNeeded();
+            if (!this._simCanExecuteAirCommand()) return;
+        }
+        if (this.fack === 0) {
+            this._sim_target_x = tx;
+            this._sim_target_y = ty;
+            this._sim_target_z = tz;
+            this._simStartMoveToCoord(tx, ty, tz, this.sim_yaw);
+            this.yielded_time_start = Date.now();
+            this.fack = 1;
+            util.yield();
+            return;
+        } else if (this.fack !== 2) {
+            if ((Date.now() - this.yielded_time_start) >= this.yielded_max_time) this.fack = 2;
+            if (this._simIsAtTarget(this._sim_target_x, this._sim_target_y, this._sim_target_z, this.sim_yaw)) this.fack = 2;
+            util.yield();
             return;
         }
+        this._simClearInterval();
+        this.sim_x = this._sim_target_x;
+        this.sim_y = this._sim_target_y;
+        this.sim_z = this._sim_target_z;
+        this._simApplyState();
+        this.fack = 0;
+    }
 
-        // --- Hardware path: HL go_to (cflib); 3D path + early stop on telemetry ---
-        this.x_telemetry_delta = this.runtime.QCA.get_x_telemetry_delta();
-        this.y_telemetry_delta = this.runtime.QCA.get_y_telemetry_delta();
-        this.init_start_coordinates();
-        const tx = Number(args.X_COORD) + this.x_telemetry_delta;
-        const ty = (Number(args.Y_COORD) * -1) + this.y_telemetry_delta;
-        const tz = Number(args.Z_COORD);
+    /**
+     * Hardware path: HL go_to absolute world coordinates.
+     * @param {number} tx
+     * @param {number} ty
+     * @param {number} tz
+     * @param {object} util
+     */
+    _hardwareFlyToWorld(tx, ty, tz, util) {
         const dx = tx - this.x;
         const dy = ty - this.y;
         const dz = tz - this.z;
@@ -1559,6 +1565,43 @@ class Scratch3QuadcopterBlocks {
                 this.init_start_coordinates();
             }
         });
+    }
+
+    copter_fly_to_coords(args, util) {
+        if (this.runtime.sim_copter_ac) {
+            const tx = Number(args.X_COORD);
+            const ty = Number(args.Y_COORD) * -1;
+            const tz = Math.max(0, Number(args.Z_COORD));
+            return this._simFlyToResolvedTargets(tx, ty, tz, util);
+        }
+
+        this.x_telemetry_delta = this.runtime.QCA.get_x_telemetry_delta();
+        this.y_telemetry_delta = this.runtime.QCA.get_y_telemetry_delta();
+        this.init_start_coordinates();
+        const tx = Number(args.X_COORD) + this.x_telemetry_delta;
+        const ty = (Number(args.Y_COORD) * -1) + this.y_telemetry_delta;
+        const tz = Number(args.Z_COORD);
+        return this._hardwareFlyToWorld(tx, ty, tz, util);
+    }
+
+    copter_move_axis_to(args, util) {
+        const axis = Cast.toString(args.AXIS).toUpperCase();
+        const coord = Number(args.COORD);
+
+        if (this.runtime.sim_copter_ac) {
+            const tx = axis === 'X' ? coord : this.sim_x;
+            const ty = axis === 'Y' ? -coord : this.sim_y;
+            const tz = axis === 'Z' ? Math.max(0, coord) : this.sim_z;
+            return this._simFlyToResolvedTargets(tx, ty, tz, util);
+        }
+
+        this.x_telemetry_delta = this.runtime.QCA.get_x_telemetry_delta();
+        this.y_telemetry_delta = this.runtime.QCA.get_y_telemetry_delta();
+        this.init_start_coordinates();
+        const tx = axis === 'X' ? coord + this.x_telemetry_delta : this.x;
+        const ty = axis === 'Y' ? (-coord) + this.y_telemetry_delta : this.y;
+        const tz = axis === 'Z' ? coord : this.z;
+        return this._hardwareFlyToWorld(tx, ty, tz, util);
     }
 
     cast_yaw_to_360(yaw) {
@@ -1760,13 +1803,6 @@ class Scratch3QuadcopterBlocks {
             ? this.flightDirKey
             : this._dirKeyFromDegrees(this.dir);
         return this._dirLabelFromKey(key);
-    }
-
-    copter_change_axis_by(args, util) {
-        const axis = Cast.toString(args.AXIS).toUpperCase();
-        if (axis === 'Y') return this.copter_change_y_by(args, util);
-        if (axis === 'Z') return this.copter_change_z_by(args, util);
-        return this.copter_change_x_by(args, util);
     }
 
     copter_battery() {
