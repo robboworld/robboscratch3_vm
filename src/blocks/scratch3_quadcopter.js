@@ -77,7 +77,7 @@ const SIM_YAW_TOLERANCE = 2.5;
 
 /**
  * Полёт по железу: velocity setpoints — в **системе координат корпуса** (cflib send_hover_setpoint).
- * HL go_to(relative) — смещение тоже в body frame. Yaw из телеметрии — только для отображения и absolute go_to.
+ * HL go_to(relative) — смещение в body frame. Полёт в точку по координатам — velocity, yaw rate 0.
  */
 const HARDWARE_YAW_RATE_DPS = 72;
 /** Ожидание isDone по телеметрии — верхняя граница (секунды полёта редко дольше). */
@@ -92,7 +92,8 @@ const HL_TARGET_COMMAND_KEYS = new Set([
     'copter_fly_up',
     'copter_land',
     'copter_fly_distance',
-    'copter_fly_to_coords'
+    'copter_fly_to_coords',
+    'copter_move_axis_to'
 ]);
 /** Do not start horizontal flight when voltage is already in the observed drop zone. */
 const HARDWARE_MIN_FLIGHT_VBAT = 3.05;
@@ -1073,8 +1074,7 @@ class Scratch3QuadcopterBlocks {
                 return {
                     dx: bdx, dy: bdy, tx, ty, tz, yawRad, durationS, deadlineMs,
                     startX: this.x, startY: this.y, startZ: this.z, battery, lowBattery,
-                    hlScheduled: false,
-                    doneLogged: false
+                    hlScheduled: false
                 };
             },
             dispatch: context => {
@@ -1095,9 +1095,6 @@ class Scratch3QuadcopterBlocks {
             },
             isDone: context => {
                 if (context.lowBattery) {
-                    if (!context.doneLogged) {
-                        context.doneLogged = true;
-                    }
                     return true;
                 }
                 if (!this.runtime.QCA.isQuadcopterConnected()) return true;
@@ -1108,9 +1105,6 @@ class Scratch3QuadcopterBlocks {
                 const distanceToTarget = Math.hypot(x - context.tx, y - context.ty, z - context.tz);
                 const reachedTarget = distanceToTarget < HARDWARE_POS_TOL_M;
                 const deadlineReached = Date.now() >= context.deadlineMs;
-                if ((reachedTarget || deadlineReached) && !context.doneLogged) {
-                    context.doneLogged = true;
-                }
                 return reachedTarget || deadlineReached;
             },
             finish: context => {
@@ -1507,58 +1501,78 @@ class Scratch3QuadcopterBlocks {
     }
 
     /**
-     * Hardware path: HL go_to absolute world coordinates.
+     * Hardware path: fly to world coordinates without changing heading.
+     * Uses HL relative go_to with a world-frame offset and yaw offset 0: the onboard
+     * planner adds the offset in world coordinates and keeps its current setpoint yaw
+     * (planner.c plan_go_to_from), so coordinates stay exact and the craft does not rotate.
      * @param {number} tx
      * @param {number} ty
      * @param {number} tz
      * @param {object} util
      */
     _hardwareFlyToWorld(tx, ty, tz, util) {
-        const dx = tx - this.x;
-        const dy = ty - this.y;
-        const dz = tz - this.z;
-        const pathLen = Math.sqrt(dx * dx + dy * dy + dz * dz);
-        const moveVel = typeof this.runtime.QCA.getFlightMoveVelocityMps === 'function'
-            ? this.runtime.QCA.getFlightMoveVelocityMps()
-            : 0.5;
-        const snap = this.runtime.QCA.getTelemetrySnapshot();
-        const yawRad = typeof this.runtime.QCA.telemetryYawToHeadingRad === 'function'
-            ? this.runtime.QCA.telemetryYawToHeadingRad(Number(snap && snap.yaw))
-            : 0;
-
-        if (pathLen < 1e-6) {
-            return this._runHardwareTimedCommand('copter_fly_to_coords', util, {
-                durationMs: 1,
-                start: () => { },
-                finish: () => this.init_start_coordinates()
-            });
-        }
-
-        const durationS = Math.max(0.25, pathLen / moveVel);
-
         return this._runHardwareTargetCommand('copter_fly_to_coords', util, {
             timeoutMs: HARDWARE_LONG_TARGET_COMMAND_TIMEOUT_MS,
             intervalMs: 200,
-            prepare: () => ({
-                hlScheduled: false,
-                tx: tx,
-                ty: ty,
-                tz: tz,
-                deadlineMs: Date.now() + durationS * 1000 + HARDWARE_HL_EXTRA_WAIT_MS
-            }),
-            dispatch: (context) => {
-                if (context.hlScheduled) return;
-                context.hlScheduled = true;
-                this.runtime.QCA.goToHighLevel(tx, ty, tz, yawRad, durationS);
+            prepare: () => {
+                this.init_start_coordinates();
+                // Firmware relative go_to adds the offset in the WORLD frame
+                // (planner.c: hover_pos = vadd(hover_pos, curr_pos)) and keeps the
+                // current heading when yaw offset is 0 — so no rotation, exact coords.
+                const dx = tx - this.x;
+                const dy = ty - this.y;
+                const dz = tz - this.z;
+                const pathLen = Math.hypot(dx, dy, dz);
+                if (pathLen < 1e-6) {
+                    return { skip: true };
+                }
+                const moveVel = typeof this.runtime.QCA.getFlightMoveVelocityMps === 'function'
+                    ? this.runtime.QCA.getFlightMoveVelocityMps()
+                    : 0.5;
+                const durationS = Math.max(0.25, pathLen / moveVel);
+                const yawRad = 0;
+                const deadlineMs = Date.now() + durationS * 1000 + HARDWARE_HL_EXTRA_WAIT_MS;
+                return {
+                    skip: false,
+                    dx: dx,
+                    dy: dy,
+                    dz: dz,
+                    tx: tx,
+                    ty: ty,
+                    tz: tz,
+                    yawRad: yawRad,
+                    durationS: durationS,
+                    deadlineMs: deadlineMs,
+                    hlScheduled: false
+                };
             },
-            isDone: (context) => {
-                if (!this.runtime.QCA.isQuadcopterConnected()) return true;
-                if (Date.now() >= context.deadlineMs) return true;
+            dispatch: context => {
+                if (context.skip || context.hlScheduled) {
+                    return;
+                }
+                context.hlScheduled = true;
+                this.runtime.QCA.goToHighLevel(
+                    context.dx, context.dy, context.dz, context.yawRad, context.durationS,
+                    {relative: true, forceLegacy: true}
+                );
+            },
+            isDone: context => {
+                if (context.skip) {
+                    return true;
+                }
+                if (!this.runtime.QCA.isQuadcopterConnected()) {
+                    return true;
+                }
                 const x = Number(this.runtime.QCA.get_coord('X'));
                 const y = Number(this.runtime.QCA.get_coord('Y'));
                 const z = Number(this.runtime.QCA.get_coord('Z'));
-                if (![x, y, z].every(Number.isFinite)) return false;
-                return Math.hypot(x - context.tx, y - context.ty, z - context.tz) < HARDWARE_POS_TOL_M;
+                if (![x, y, z].every(Number.isFinite)) {
+                    return false;
+                }
+                const distanceToTarget = Math.hypot(x - context.tx, y - context.ty, z - context.tz);
+                const reachedTarget = distanceToTarget < HARDWARE_POS_TOL_M;
+                const deadlineReached = Date.now() >= context.deadlineMs;
+                return reachedTarget || deadlineReached;
             },
             finish: () => {
                 this.runtime.QCA.hoverStop();
