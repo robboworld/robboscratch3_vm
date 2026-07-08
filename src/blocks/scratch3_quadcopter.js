@@ -139,6 +139,7 @@ class Scratch3QuadcopterBlocks {
         this.sim_is_flying = false;
         this.sim_battery = 100;
         this.sim_interval = null;
+        this._sim_rotate_remaining = 0;
         this.sim_base_size = SIM_BASE_SIZE;
 
         this.SendCordInterval = null;
@@ -486,6 +487,36 @@ class Scratch3QuadcopterBlocks {
             this.sim_yaw = this._castYawTo360(this.sim_yaw);
             this._simApplyState();
         }, SIM_STEP_MS);
+    }
+
+    /**
+     * Simulator yaw: rotate by the full signed angle (may exceed 360°), not shortest path.
+     * @param {number} signedDeg
+     */
+    _simStartRotateBy(signedDeg) {
+        this._simClearInterval();
+        const remaining = Number.isFinite(signedDeg) ? Math.abs(signedDeg) : 0;
+        this._sim_rotate_remaining = remaining;
+        if (remaining < SIM_YAW_TOLERANCE) {
+            this._sim_rotate_remaining = 0;
+            return;
+        }
+        const sign = signedDeg >= 0 ? 1 : -1;
+        this.sim_interval = setInterval(() => {
+            const yawStep = 90 * (SIM_STEP_MS / 1000);
+            const step = Math.min(this._sim_rotate_remaining, yawStep);
+            this.sim_yaw = this._castYawTo360(this.sim_yaw + sign * step);
+            this._sim_rotate_remaining -= step;
+            if (this._sim_rotate_remaining <= SIM_YAW_TOLERANCE) {
+                this._sim_rotate_remaining = 0;
+                this._simClearInterval();
+            }
+            this._simApplyState();
+        }, SIM_STEP_MS);
+    }
+
+    _simIsRotateByComplete() {
+        return this._sim_rotate_remaining <= SIM_YAW_TOLERANCE && !this.sim_interval;
     }
 
     _simIsAtTarget(tx, ty, tz, tyaw) {
@@ -1634,20 +1665,18 @@ class Scratch3QuadcopterBlocks {
                 if (!this._simCanExecuteAirCommand()) return;
             }
             if (this.fack === 0) {
-                this._sim_target_yaw = this._castYawTo360(this.sim_yaw + signedDeg);
-                this._simStartMoveToCoord(this.sim_x, this.sim_y, this.sim_z, this._sim_target_yaw);
+                this._simStartRotateBy(signedDeg);
                 this.yielded_time_start = Date.now();
                 this.fack = 1;
                 util.yield();
                 return;
             } else if (this.fack !== 2) {
                 if ((Date.now() - this.yielded_time_start) >= this.yielded_max_time) this.fack = 2;
-                if (this._simIsAtTarget(this.sim_x, this.sim_y, this.sim_z, this._sim_target_yaw)) this.fack = 2;
+                if (this._simIsRotateByComplete()) this.fack = 2;
                 util.yield();
                 return;
             }
             this._simClearInterval();
-            this.sim_yaw = this._sim_target_yaw;
             this._simApplyState();
             this.fack = 0;
             return;
@@ -1666,17 +1695,13 @@ class Scratch3QuadcopterBlocks {
             activeRotate.ownerId === rotateOwnerId;
         if (!rotateInProgress) {
             this.init_start_coordinates();
-            const startW = this.yaw;
-            const targetW = this._castYawTo360(startW + signedDeg);
-            const turn = this._shortestYawDeltaDeg(startW, targetW);
-            const durationMs = (Math.abs(turn) / HARDWARE_YAW_RATE_DPS) * 1000;
-            const yawRate = Math.abs(turn) < 1e-3 ? 0 : Math.sign(turn) * HARDWARE_YAW_RATE_DPS;
+            const turn = signedDeg;
+            const durationMs = (magnitude / HARDWARE_YAW_RATE_DPS) * 1000;
+            const yawRate = magnitude < 1e-3 ? 0 : Math.sign(turn) * HARDWARE_YAW_RATE_DPS;
             this._hwRotatePlan = {
                 ownerId: rotateOwnerId,
                 side,
                 signedDeg,
-                startW,
-                targetW,
                 turn,
                 durationMs,
                 yawRate
