@@ -1847,13 +1847,10 @@ class Scratch3QuadcopterBlocks {
 
     init_start_coordinates() {
         const snap = this.runtime.QCA.getTelemetrySnapshot();
-        const yawRad = Number(snap && snap.yaw);
         const xRaw = Number(this.runtime.QCA.get_coord("X"));
         const yRaw = Number(this.runtime.QCA.get_coord("Y"));
         const zRaw = Number(this.runtime.QCA.get_coord("Z"));
-        this.yaw = typeof this.runtime.QCA.telemetryYawToDegrees === 'function'
-            ? this.runtime.QCA.telemetryYawToDegrees(yawRad)
-            : yawRad * 180 / Math.PI;
+        this.yaw = Number(snap && snap.yawDeg) || 0;
         this.x = xRaw;
         this.y = yRaw;
         this.z = zRaw;
