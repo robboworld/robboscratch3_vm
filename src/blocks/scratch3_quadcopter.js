@@ -191,7 +191,8 @@ class Scratch3QuadcopterBlocks {
             copter_battery: this.copter_battery,
             copter_is_flying: this.copter_is_flying,
             copter_set_speed: this.copter_set_speed,
-            copter_speed: this.copter_speed
+            copter_speed: this.copter_speed,
+            copter_reset_local_position: this.copter_reset_local_position
         };
     }
 
@@ -1481,10 +1482,14 @@ class Scratch3QuadcopterBlocks {
         return this._runHardwareTimedCommand('copter_fly_for_seconds_to_coords', util, {
             durationMs: Number(args.SECONDS) * 1000,
             start: () => {
+                this.x_telemetry_delta = this.runtime.QCA.get_x_telemetry_delta();
+                this.y_telemetry_delta = this.runtime.QCA.get_y_telemetry_delta();
                 this.init_start_coordinates();
                 const sec = Number(args.SECONDS);
-                const vx = sec > 0 ? (Number(args.X_COORD) - this.x) / sec : 0;
-                const vy = sec > 0 ? (Number(args.Y_COORD) - this.y) / sec : 0;
+                const targetX = Number(args.X_COORD) + this.x_telemetry_delta;
+                const targetY = (Number(args.Y_COORD) * -1) + this.y_telemetry_delta;
+                const vx = sec > 0 ? (targetX - this.x) / sec : 0;
+                const vy = sec > 0 ? (targetY - this.y) / sec : 0;
                 this.z = Number(args.Z_COORD);
                 this.runtime.QCA.move_with_speed(vx, vy, 0, this.z);
             },
@@ -1868,6 +1873,28 @@ class Scratch3QuadcopterBlocks {
     copter_speed() {
         const s = Number(this.speed);
         return Number.isFinite(s) ? s : 0;
+    }
+
+    copter_reset_local_position() {
+        if (this.runtime.sim_copter_ac) {
+            if (this.sim_is_flying || this.sim_z > 0.02) {
+                return;
+            }
+            this.sim_x = 0;
+            this.sim_y = 0;
+            this._simApplyState();
+            return;
+        }
+
+        if (!this.runtime.QCA ||
+            typeof this.runtime.QCA.canResetLocalPosition !== 'function' ||
+            typeof this.runtime.QCA.resetLocalPosition !== 'function') {
+            return;
+        }
+
+        if (this.runtime.QCA.canResetLocalPosition()) {
+            this.runtime.QCA.resetLocalPosition();
+        }
     }
 
     init_start_coordinates() {
