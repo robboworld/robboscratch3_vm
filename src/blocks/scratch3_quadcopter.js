@@ -1444,7 +1444,8 @@ class Scratch3QuadcopterBlocks {
             if (this.fack === 0) {
                 const seconds = Number(args.SECONDS);
                 const tx = Number(args.X_COORD);
-                const ty = Number(args.Y_COORD) * -1;
+                // Sim uses Scratch-aligned Y (same as sim_y / reporter); do not apply hardware Y flip.
+                const ty = Number(args.Y_COORD);
                 const tz = Number(args.Z_COORD);
                 const vx = seconds > 0 ? (tx - this.sim_x) / seconds : 0;
                 const vy = seconds > 0 ? (ty - this.sim_y) / seconds : 0;
@@ -1620,7 +1621,8 @@ class Scratch3QuadcopterBlocks {
     copter_fly_to_coords(args, util) {
         if (this.runtime.sim_copter_ac) {
             const tx = Number(args.X_COORD);
-            const ty = Number(args.Y_COORD) * -1;
+            // Sim uses Scratch-aligned Y (same as sim_y / reporter); do not apply hardware Y flip.
+            const ty = Number(args.Y_COORD);
             const tz = Math.max(0, Number(args.Z_COORD));
             return this._simFlyToResolvedTargets(tx, ty, tz, util);
         }
@@ -1640,7 +1642,8 @@ class Scratch3QuadcopterBlocks {
 
         if (this.runtime.sim_copter_ac) {
             const tx = axis === 'X' ? coord : this.sim_x;
-            const ty = axis === 'Y' ? -coord : this.sim_y;
+            // Sim uses Scratch-aligned Y (same as sim_y / reporter); do not apply hardware Y flip.
+            const ty = axis === 'Y' ? coord : this.sim_y;
             const tz = axis === 'Z' ? Math.max(0, coord) : this.sim_z;
             return this._simFlyToResolvedTargets(tx, ty, tz, util);
         }
