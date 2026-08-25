@@ -437,18 +437,29 @@ class VirtualMachine extends EventEmitter {
     }
 
     _hasSimulationRobotSprite () {
-        if (!this.runtime || !this.runtime.targets) return false;
-        const names = ['Robbo Robot', 'Robbo Platform', 'RobboPlatform'];
-        return this.runtime.targets.some(t =>
-            t.isOriginal && !t.isStage && names.includes(t.sprite.name)
-        );
+        return this._getSimulationSpriteFlags().robot;
     }
 
     _hasSimulationCopterSprite () {
-        if (!this.runtime || !this.runtime.targets) return false;
-        return this.runtime.targets.some(t =>
-            t.isOriginal && !t.isStage && t.sprite && t.sprite.name === 'Robbo Quadcopter'
-        );
+        return this._getSimulationSpriteFlags().copter;
+    }
+
+    _getSimulationSpriteFlags () {
+        const result = {robot: false, copter: false};
+        if (!this.runtime || !this.runtime.targets) return result;
+        const robotNames = ['Robbo Robot', 'Robbo Platform', 'RobboPlatform'];
+        for (let i = 0; i < this.runtime.targets.length; i++) {
+            const t = this.runtime.targets[i];
+            if (!t || !t.isOriginal || t.isStage || !t.sprite) continue;
+            if (!result.robot && robotNames.includes(t.sprite.name)) {
+                result.robot = true;
+            }
+            if (!result.copter && t.sprite.name === 'Robbo Quadcopter') {
+                result.copter = true;
+            }
+            if (result.robot && result.copter) break;
+        }
+        return result;
     }
 
     /**
@@ -1657,8 +1668,9 @@ class VirtualMachine extends EventEmitter {
      */
     emitTargetsUpdate (triggerProjectChange) {
         if (typeof triggerProjectChange === 'undefined') triggerProjectChange = true;
-        const hasRobot = this._hasSimulationRobotSprite();
-        const hasCopter = this._hasSimulationCopterSprite();
+        const simFlags = this._getSimulationSpriteFlags();
+        const hasRobot = simFlags.robot;
+        const hasCopter = simFlags.copter;
         const robotMismatch = !!this.runtime.sim_ac && !hasRobot;
         const copterMismatch = !!this.runtime.sim_copter_ac && !hasCopter;
         // Only reconcile sim vs sprites when a project is actually present.

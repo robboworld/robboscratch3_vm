@@ -187,12 +187,6 @@ class Runtime extends EventEmitter {
       this.allOtherStuffBeginTime_2 = Date.now();
       this.allOtherStuffEndTime_2 = Date.now();
 
-      this.averageStepDeltaTime = 0;
-      this.avTimeInterval = null;
-      this.step_time_delta = 0;
-      this.settingsSaved = false;
-
-
         /**
          * Target management and storage.
          * @type {Array.<!Target>}
@@ -312,13 +306,7 @@ class Runtime extends EventEmitter {
         this.turboMode = false;
 
         /**
-         * Whether the project is in "compatibility mode" (30 TPS).
-         * @type {Boolean}
-         */
-        this.compatibilityMode = false;
-
-        /**
-         * User-configurable VM thread step interval in ms (clamped 1–10 via setThreadStepIntervalMs).
+         * VM thread step interval in ms. Fixed internal constant (not a user setting).
          * @type {number}
          */
         this.threadStepIntervalMs = Runtime.THREAD_STEP_INTERVAL;
@@ -329,6 +317,25 @@ class Runtime extends EventEmitter {
          * @type {!number}
          */
         this._steppingInterval = null;
+
+        /**
+         * Persistent dirty flag for the visible stage. Unlike redrawRequested,
+         * this is cleared only after an actual renderer.draw().
+         * @type {boolean}
+         */
+        this._renderDirty = true;
+
+        /**
+         * requestAnimationFrame id for the decoupled render loop, or null.
+         * @type {?number}
+         */
+        this._renderRafId = null;
+
+        /**
+         * Timestamp of last _pushMonitors() call.
+         * @type {number}
+         */
+        this._lastMonitorPushTime = 0;
 
         /**
          * Current length of a step.
@@ -696,20 +703,14 @@ class Runtime extends EventEmitter {
      * How rapidly we try to step threads by default, in ms.
      */
     static get THREAD_STEP_INTERVAL () {
-        //return 1000 / 60;
-
-       return 4;
+        return 4;
     }
 
     /**
-     * In compatibility mode, how rapidly we try to step threads, in ms.
+     * Minimum interval between monitor-thread queues, in ms (~30 Hz).
      */
-    static get THREAD_STEP_INTERVAL_COMPATIBILITY () {
-      // return 1000 / 30;
-
-        return 4;
-
-       //return 6;
+    static get MONITOR_PUSH_INTERVAL_MS () {
+        return 33;
     }
 
     /**
@@ -1301,6 +1302,10 @@ class Runtime extends EventEmitter {
     attachRenderer (renderer) {
         this.renderer = renderer;
         this.renderer.setLayerGroupOrdering(StageLayering.LAYER_GROUPS);
+        this._renderDirty = true;
+        if (this._steppingInterval) {
+            this._startRenderLoop();
+        }
     }
 
     /**
@@ -1591,6 +1596,7 @@ class Runtime extends EventEmitter {
      * Dispose all targets. Return to clean state.
      */
     dispose () {
+        this._stopRenderLoop();
         this.stopAll();
         // Deleting each target's variable's monitors.
         this.targets.forEach(target => {
@@ -1787,7 +1793,9 @@ class Runtime extends EventEmitter {
             }
         }
         this.redrawRequested = false;
-        this._pushMonitors();
+        if (!this._renderRafId || this._shouldPushMonitors()) {
+            this._pushMonitors();
+        }
         if (this.profiler !== null) {
             if (stepThreadsProfilerId === -1) {
                 stepThreadsProfilerId = this.profiler.idByName('Sequencer.stepThreads');
@@ -1822,18 +1830,8 @@ class Runtime extends EventEmitter {
         // Store threads that completed this iteration for testing and other
         // internal purposes.
         this._lastStepDoneThreads = doneThreads;
-        if (this.renderer) {
-            // @todo: Only render when this.redrawRequested or clones rendered.
-            if (this.profiler !== null) {
-                if (rendererDrawProfilerId === -1) {
-                    rendererDrawProfilerId = this.profiler.idByName('RenderWebGL.draw');
-                }
-                this.profiler.start(rendererDrawProfilerId);
-            }
-            this.renderer.draw();
-            if (this.profiler !== null) {
-                this.profiler.stop();
-            }
+        if (this.renderer && !this._renderRafId) {
+            this._drawFrame();
         }
 
         if (this._refreshTargets) {
@@ -1876,7 +1874,16 @@ class Runtime extends EventEmitter {
      * Queue monitor blocks to sequencer to be run.
      */
     _pushMonitors () {
+        this._lastMonitorPushTime = Date.now();
         this.monitorBlocks.runAllMonitored(this);
+    }
+
+    /**
+     * Whether monitor threads should be queued this tick (~30 Hz when rAF loop is active).
+     * @return {boolean}
+     */
+    _shouldPushMonitors () {
+        return Date.now() - this._lastMonitorPushTime >= Runtime.MONITOR_PUSH_INTERVAL_MS;
     }
 
     /**
@@ -1891,11 +1898,11 @@ class Runtime extends EventEmitter {
     }
 
     /**
-     * Set whether we are in 30 TPS compatibility mode.
-     * @param {boolean} compatibilityModeOn True iff in compatibility mode.
+     * Compatibility-mode API (Scratch 2.0 30 TPS). Interval is a fixed internal
+     * constant; this only restarts the stepping timer if already running.
+     * @param {boolean} compatibilityModeOn Unused; kept for VM API compatibility.
      */
     setCompatibilityMode (compatibilityModeOn) {
-        this.compatibilityMode = compatibilityModeOn;
         if (this._steppingInterval) {
             clearInterval(this._steppingInterval);
             this._steppingInterval = null;
@@ -2310,6 +2317,7 @@ class Runtime extends EventEmitter {
      */
     requestRedraw () {
         this.redrawRequested = true;
+        this._renderDirty = true;
     }
 
     /**
@@ -2329,14 +2337,52 @@ class Runtime extends EventEmitter {
         this.emit(Runtime.BLOCKS_NEED_UPDATE);
     }
 
-    clearAvTimeInterval(){
-
-        clearInterval(this.avTimeInterval);
+    /**
+     * Draw the visible stage if it is dirty. Used by the rAF loop and by Node
+     * tests that call _step() without requestAnimationFrame.
+     */
+    _drawFrame () {
+        if (!this.renderer) {
+            return;
+        }
+        if (this.profiler !== null) {
+            if (rendererDrawProfilerId === -1) {
+                rendererDrawProfilerId = this.profiler.idByName('RenderWebGL.draw');
+            }
+            this.profiler.start(rendererDrawProfilerId);
+        }
+        this.renderer.draw();
+        this._renderDirty = false;
+        if (this.profiler !== null) {
+            this.profiler.stop();
+        }
     }
 
-    setSettingsSaved(){
+    _drawIfDirty () {
+        if (this._renderDirty) {
+            this._drawFrame();
+        }
+    }
 
-        this.settingsSaved = true;
+    _startRenderLoop () {
+        if (this._renderRafId) {
+            return;
+        }
+        if (typeof requestAnimationFrame !== 'function') {
+            return;
+        }
+        const loop = () => {
+            this._renderRafId = requestAnimationFrame(loop);
+            this._drawIfDirty();
+        };
+        this._renderRafId = requestAnimationFrame(loop);
+    }
+
+    _stopRenderLoop () {
+        if (this._renderRafId && typeof cancelAnimationFrame === 'function') {
+            cancelAnimationFrame(this._renderRafId);
+        }
+        this._renderRafId = null;
     }
 
     /**
@@ -2351,6 +2397,7 @@ class Runtime extends EventEmitter {
         this._steppingInterval = setInterval(() => {
             this._step();
         }, interval);
+        this._startRenderLoop();
         this.emit(Runtime.RUNTIME_STARTED);
     }
 

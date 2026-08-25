@@ -139,6 +139,7 @@ class Scratch3QuadcopterBlocks {
         this.sim_is_flying = false;
         this.sim_battery = 100;
         this.sim_interval = null;
+        this._simCopterTargetCache = null;
         this._sim_rotate_remaining = 0;
         this.sim_base_size = SIM_BASE_SIZE;
 
@@ -204,16 +205,33 @@ class Scratch3QuadcopterBlocks {
 
     _getSimCopterTarget() {
         if (!this.runtime || !this.runtime.targets) return null;
+        if (this._isValidCopterTarget(this._simCopterTargetCache)) {
+            return this._simCopterTargetCache;
+        }
         for (let i = 0; i < this.runtime.targets.length; i++) {
             const t = this.runtime.targets[i];
             if (t.isOriginal && !t.isStage && t.sprite && t.sprite.name === COPTER_SPRITE_NAME) {
+                this._simCopterTargetCache = t;
                 return t;
             }
         }
+        this._simCopterTargetCache = null;
         return null;
     }
 
+    _isValidCopterTarget(target) {
+        return Boolean(
+            target &&
+            target.isOriginal &&
+            !target.isStage &&
+            target.sprite &&
+            target.sprite.name === COPTER_SPRITE_NAME &&
+            this.runtime.targets.indexOf(target) !== -1
+        );
+    }
+
     _disableSimByMissingSprite() {
+        this._simCopterTargetCache = null;
         if (!this.runtime || !this.runtime.sim_copter_ac) return;
         this.runtime.sim_copter_ac = false;
         this._simClearInterval();

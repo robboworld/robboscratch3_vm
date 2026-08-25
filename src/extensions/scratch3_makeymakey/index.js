@@ -79,9 +79,12 @@ class Scratch3MakeyMakeyBlocks {
         this.frameToggle = false;
 
         // Set an interval that toggles the frameToggle every frame.
+        const stepMs = this.runtime.currentStepTime ||
+            (this.runtime.constructor && this.runtime.constructor.THREAD_STEP_INTERVAL) ||
+            4;
         setInterval(() => {
             this.frameToggle = !this.frameToggle;
-        }, this.runtime.currentStepTime);
+        }, stepMs);
 
         this.keyPressed = this.keyPressed.bind(this);
         this.runtime.on('KEY_PRESSED', this.keyPressed);

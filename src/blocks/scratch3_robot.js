@@ -16,6 +16,10 @@ const {
 } = require('../robot/sim-sensor-probes');
 
 const SIM_ROBOT_SPRITE_NAMES = ['Robbo Robot', 'Robbo Platform', 'RobboPlatform'];
+const SIM_PHYSICS_REF_DT_MS = 4;
+const SIM_PHYSICS_MAX_DT_MS = 32;
+const SIM_PHYSICS_INTERVAL_MS = 4;
+const SIM_WALL_RAY_COARSE_STEP = 4;
 
 class Scratch3RobotBlocks {
     constructor (runtime) {
@@ -93,6 +97,8 @@ class Scratch3RobotBlocks {
         this.sim_pl = 63;
         this.sim_pr = 63;
         this.sim_int = null;
+        this._simTargetCache = null;
+        this._simLastStepTime = 0;
         this.distl=0;
         this.distr=0;
         this.minidist = 0;
@@ -183,6 +189,7 @@ class Scratch3RobotBlocks {
             clearInterval(this.sim_int);
             this.sim_int = null;
         }
+        this._simTargetCache = null;
         if (this.a_command_unblock_interval != null) {
             clearInterval(this.a_command_unblock_interval);
             this.a_command_unblock_interval = null;
@@ -267,24 +274,58 @@ class Scratch3RobotBlocks {
 
   getSimTarget (util) {
     if (!this.runtime.sim_ac) return util.target;
+    if (this._isValidSimTarget(this._simTargetCache)) {
+      return this._simTargetCache;
+    }
     const robot = this.runtime.targets.find(t => !t.isStage && t.sprite && SIM_ROBOT_SPRITE_NAMES.includes(t.sprite.name));
     if (!robot) {
+      this._simTargetCache = null;
       this.runtime.sim_ac = false;
       this.runtime.going = false;
-      clearInterval(this.sim_int);
-      this.sim_int = null;
+      this._clearSimInterval();
       this.runtime.emit('ROBBO_SIM_SPRITES_INVALIDATED', {robot: true, copter: false});
       return util.target;
     }
+    this._simTargetCache = robot;
     return robot;
+  }
+
+  _isValidSimTarget (target) {
+    return Boolean(
+      target &&
+      !target.isStage &&
+      target.sprite &&
+      SIM_ROBOT_SPRITE_NAMES.includes(target.sprite.name) &&
+      this.runtime.targets.indexOf(target) !== -1
+    );
+  }
+
+  _nowMs () {
+    return (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+  }
+
+  _clearSimInterval () {
+    if (this.sim_int != null) {
+      clearInterval(this.sim_int);
+      this.sim_int = null;
+    }
+  }
+
+  _startSimMotorLoop (target, pl, pr, options) {
+    this._clearSimInterval();
+    this._simLastStepTime = this._nowMs();
+    this.sim_int = setInterval(() => {
+      const now = this._nowMs();
+      const dtMs = now - this._simLastStepTime;
+      this._simLastStepTime = now;
+      this._simStepMotorSimulation(target, pl, pr, options, dtMs);
+    }, SIM_PHYSICS_INTERVAL_MS);
   }
 
   getSimSensorDebugData () {
     if (!this.runtime || !this.runtime.sim_ac) return [];
-    const robot = this.runtime.targets.find(t => !t.isStage && t.sprite && SIM_ROBOT_SPRITE_NAMES.includes(t.sprite.name));
-    if (!robot) {
-      this.runtime.sim_ac = false;
-      this.runtime.emit('ROBBO_SIM_SPRITES_INVALIDATED', {robot: true, copter: false});
+    const robot = this.getSimTarget({target: null});
+    if (!robot || !this.runtime.sim_ac) {
       return [];
     }
     return this.simSensorProbes.map((sensorCfg, idx) => {
@@ -339,29 +380,31 @@ class Scratch3RobotBlocks {
    * @param {number} pr - right motor sim power
    * @param {Object} [options] Optional; if `options.trackDist` is true, also updates distl/distr.
    */
-  _simStepMotorSimulation (target, pl, pr, options) {
+  _simStepMotorSimulation (target, pl, pr, options, dtMs) {
     const trackDist = options && options.trackDist;
     const prevX = this.xc;
     const prevY = this.yc;
+    const elapsed = typeof dtMs === 'number' && Number.isFinite(dtMs) ? dtMs : SIM_PHYSICS_REF_DT_MS;
+    const scale = Math.min(Math.max(elapsed, 0), SIM_PHYSICS_MAX_DT_MS) / SIM_PHYSICS_REF_DT_MS;
     const radians = MathUtil.degToRad(90 - target.direction);
-    const dist = (pl + pr) / 2 * this.kW;
+    const dist = (pl + pr) / 2 * this.kW * scale;
     const dx = dist * Math.cos(radians);
     const dy = dist * Math.sin(radians);
     this.yc += dy;
     this.xc += dx;
     target.setXY(this.xc, this.yc);
-    if (target.isTouchingColor(this.wall_color)) {
+    if ((dx !== 0 || dy !== 0) && target.isTouchingColor(this.wall_color)) {
       this.yc -= dy;
       this.xc -= dx;
       target.setXY(this.xc, this.yc);
     }
-    const deltaDeg = MathUtil.radToDeg(Math.atan((pl - pr) / this.rad));
+    const deltaDeg = MathUtil.radToDeg(Math.atan((pl - pr) / this.rad)) * scale;
     target.setDirection(target.direction + deltaDeg);
     const moved = this.xc !== prevX || this.yc !== prevY;
     const rotated = Math.abs(deltaDeg) > 1e-9;
     if (moved || rotated) {
-      const dl = Math.abs(pl * this.kW);
-      const dr = Math.abs(pr * this.kW);
+      const dl = Math.abs(pl * this.kW) * scale;
+      const dr = Math.abs(pr * this.kW) * scale;
       this.sim_dist_l += dl;
       this.sim_dist_r += dr;
       if (trackDist) {
@@ -421,9 +464,7 @@ class Scratch3RobotBlocks {
               this.xc=simTarget.x;
               this.yc=simTarget.y;
               simTarget.setXY(this.xc, this.yc);
-              this.sim_int = setInterval(() => {
-                this._simStepMotorSimulation(simTarget, this.sim_pl, this.sim_pr, {trackDist: false});
-              }, this.runtime.threadStepIntervalMs);
+              this._startSimMotorLoop(simTarget, this.sim_pl, this.sim_pr, {trackDist: false});
           }
           else
           {
@@ -450,15 +491,13 @@ class Scratch3RobotBlocks {
 
     if(this.runtime.sim_ac){
       const simTarget = this.getSimTarget(util);
-      clearInterval(this.sim_int);
+      this._clearSimInterval();
       this.runtime.going=true;
       this.xc=simTarget.x;
       this.yc=simTarget.y;
       simTarget.setXY(this.xc, this.yc);
-      this._simStepMotorSimulation(simTarget, this.sim_pl, this.sim_pr, {trackDist: false});
-      this.sim_int = setInterval(() => {
-        this._simStepMotorSimulation(simTarget, this.sim_pl, this.sim_pr, {trackDist: false});
-      }, this.runtime.threadStepIntervalMs);
+      this._simStepMotorSimulation(simTarget, this.sim_pl, this.sim_pr, {trackDist: false}, SIM_PHYSICS_REF_DT_MS);
+      this._startSimMotorLoop(simTarget, this.sim_pl, this.sim_pr, {trackDist: false});
   }
   else{
       let power_left = this.power_left;
@@ -672,21 +711,33 @@ robot_first_draw(util){
 
   getDistToWall(util, radians, startPoint, maxDist) {
     const maxDistance = typeof maxDist === "number" ? maxDist : 100;
-    const step = 1;
-    for (let dist = 0; dist <= maxDistance; dist += step) {
+    const isWall = (dist) => {
       const point = [
         startPoint[0] + dist * Math.cos(radians),
         startPoint[1] + dist * Math.sin(radians),
         0
       ];
       const color = this.sampleStageColor(util, point);
-      if (
+      return (
         Math.abs(color[0] - this.wall_color[0]) <= 2 &&
         Math.abs(color[1] - this.wall_color[1]) <= 2 &&
         Math.abs(color[2] - this.wall_color[2]) <= 2
-      ) {
+      );
+    };
+    if (isWall(0)) {
+      return 0;
+    }
+    let lastClear = 0;
+    for (let dist = SIM_WALL_RAY_COARSE_STEP; dist <= maxDistance; dist += SIM_WALL_RAY_COARSE_STEP) {
+      if (isWall(dist)) {
+        for (let d = lastClear + 1; d <= dist; d++) {
+          if (isWall(d)) {
+            return d;
+          }
+        }
         return dist;
       }
+      lastClear = dist;
     }
     return maxDistance;
   }
@@ -1172,16 +1223,13 @@ robot_first_draw(util){
           this.need_to_stop = false;
           if(this.runtime.sim_ac){
             const simTarget = this.getSimTarget(util);
-            clearInterval(this.sim_int);
             this.runtime.going=true;
             this.xc=simTarget.x;
             this.yc=simTarget.y;
             simTarget.setXY(this.xc, this.yc);
             this.distl=0;
             this.distr=0;
-            this.sim_int = setInterval(() => {
-              this._simStepMotorSimulation(simTarget, this.sim_pl, this.sim_pr, {trackDist: true});
-            }, this.runtime.threadStepIntervalMs);
+            this._startSimMotorLoop(simTarget, this.sim_pl, this.sim_pr, {trackDist: true});
           }
           else {
             this.runtime.RCA.setRobotPowerAndStepLimits(this.power_left,this.power_right,util.stackFrame.steps,0);
@@ -1266,9 +1314,7 @@ robot_first_draw(util){
           this.distr=0;
           this.xc=util.target.x;
           this.yc=util.target.y;
-          this.sim_int = setInterval(() => {
-            this._simStepMotorSimulation(util.target, simpl, simpr, {trackDist: true});
-          }, this.runtime.threadStepIntervalMs);
+          this._startSimMotorLoop(util.target, simpl, simpr, {trackDist: true});
         }
         else{
         this.runtime.RCA.setRobotPowerAndStepLimits(power_left,power_right, util.stackFrame.steps ,0);
@@ -1371,9 +1417,7 @@ robot_first_draw(util){
                   this.distr=0;
                   this.xc=util.target.x;
                   this.yc=util.target.y;
-                this.sim_int = setInterval(() => {
-                  this._simStepMotorSimulation(util.target, simpl, simpr, {trackDist: true});
-                }, this.runtime.threadStepIntervalMs);
+                this._startSimMotorLoop(util.target, simpl, simpr, {trackDist: true});
               }
               else{
               this.runtime.RCA.setRobotPowerAndStepLimits(power_left,power_right, util.stackFrame.steps ,0);
