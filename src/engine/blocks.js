@@ -8,6 +8,7 @@ const BlocksExecuteCache = require('./blocks-execute-cache');
 const log = require('../util/log');
 const Variable = require('./variable');
 const getMonitorIdForBlockWithArgs = require('../util/get-monitor-id');
+const {copterDirectionDropdownValue} = require('../util/copter-direction-arg');
 
 /**
  * @fileoverview
@@ -530,6 +531,11 @@ class Blocks {
         // Could happen, e.g., for an unobscured shadow.
         if (this._blocks.hasOwnProperty(block.id)) {
             return;
+        }
+        if (block.opcode === 'copter_directions' &&
+            block.fields && block.fields.COPTER_DIRECTIONS) {
+            block.fields.COPTER_DIRECTIONS.value =
+                copterDirectionDropdownValue(block.fields.COPTER_DIRECTIONS.value);
         }
         // Create new block.
         this._blocks[block.id] = block;
@@ -1080,8 +1086,12 @@ class Blocks {
                 xmlString += ` variabletype="${varType}"`;
             }
             let value = blockField.value;
+            if (block.opcode === 'copter_directions' && blockField.name === 'COPTER_DIRECTIONS') {
+                value = copterDirectionDropdownValue(value);
+                blockField.value = value;
+            }
             if (typeof value === 'string') {
-                value = xmlEscape(blockField.value);
+                value = xmlEscape(value);
             }
             xmlString += `>${value}</field>`;
         }
