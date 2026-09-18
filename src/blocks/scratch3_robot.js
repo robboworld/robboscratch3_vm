@@ -1209,7 +1209,10 @@ robot_first_draw(util){
             /*console.warn(this.start_deg);
             console.warn(Number(args.DEGREES));
             console.warn(this.start_deg+Number(args.DEGREES));*/
-            util.target.setDirection(this.start_deg+Number(args.DEGREES));
+            const simTarget = this.runtime.sim_ac ? this.getSimTarget(util) : null;
+            if (this.runtime.sim_ac && simTarget) {
+              simTarget.setDirection(this.start_deg+Number(args.DEGREES));
+            }
       }
     } else {
            if (!this.runtime.RCA.isRobotReadyToAcceptCommand()){
@@ -1258,16 +1261,22 @@ robot_first_draw(util){
 
         if(this.runtime.sim_ac){
   //        console.warn(this.sim_pr);
+          const simTarget = this.getSimTarget(util);
+          if (!this.runtime.sim_ac || !simTarget) {
+            util.stackFrame.steps = null;
+            this.runtime.going = false;
+            return;
+          }
           this.runtime.going=true;
-        this.start_deg = util.target.direction;
+        this.start_deg = simTarget.direction;
           let simpl=30;
           let simpr=-30;
           this.distl=0;
           this.distr=0;
-          this.xc=util.target.x;
-          this.yc=util.target.y;
+          this.xc=simTarget.x;
+          this.yc=simTarget.y;
           this.sim_int = setInterval(() => {
-            this._simStepMotorSimulation(util.target, simpl, simpr, {trackDist: true});
+            this._simStepMotorSimulation(simTarget, simpl, simpr, {trackDist: true});
           }, this.runtime.threadStepIntervalMs);
         }
         else{
@@ -1301,7 +1310,10 @@ robot_first_draw(util){
                     clearInterval(this.sim_int);
                     util.stackFrame.steps = null;
                     this.runtime.going=false;
-                    util.target.setDirection(this.start_deg-Number(args.DEGREES));
+                    const simTarget = this.runtime.sim_ac ? this.getSimTarget(util) : null;
+                    if (this.runtime.sim_ac && simTarget) {
+                      simTarget.setDirection(this.start_deg-Number(args.DEGREES));
+                    }
               }
           } else {
 
@@ -1362,17 +1374,23 @@ robot_first_draw(util){
 
 
               if(this.runtime.sim_ac){
+                  const simTarget = this.getSimTarget(util);
+                  if (!this.runtime.sim_ac || !simTarget) {
+                    util.stackFrame.steps = null;
+                    this.runtime.going = false;
+                    return;
+                  }
                   clearInterval(this.sim_int);
-                    this.start_deg = util.target.direction;
+                    this.start_deg = simTarget.direction;
                   this.runtime.going=true;
                   let simpl=-30;
                   let simpr=30;
                   this.distl=0;
                   this.distr=0;
-                  this.xc=util.target.x;
-                  this.yc=util.target.y;
+                  this.xc=simTarget.x;
+                  this.yc=simTarget.y;
                 this.sim_int = setInterval(() => {
-                  this._simStepMotorSimulation(util.target, simpl, simpr, {trackDist: true});
+                  this._simStepMotorSimulation(simTarget, simpl, simpr, {trackDist: true});
                 }, this.runtime.threadStepIntervalMs);
               }
               else{
