@@ -140,11 +140,14 @@ const playgroundBuilder = webBuilder.clone()
         }
     ]));
 
-// Robbo: BUILD_MODE=app (scripts/build.sh) builds only the library bundles, without the playground.
+// Robbo: BUILD_MODE=app (scripts/build.mjs) builds only what the GUI consumes — dist/web, without the
+// node bundle and the playground; a release app build skips source maps (the GUI does not read them).
 const isAppBuild = process.env.BUILD_MODE === 'app';
+if (isAppBuild && process.env.NODE_ENV === 'production') {
+    webBuilder.merge({devtool: false});
+}
 
 module.exports = isAppBuild ? [
-    nodeBuilder.get(),
     webBuilder.get()
 ] : [
     nodeBuilder.get(),
