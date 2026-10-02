@@ -8,7 +8,7 @@
  * ... pass some time ...
  * var timeDifference = timer.timeElapsed();
  * ---
- * Or, you can use the `time` and `relativeTime`
+ * Or, you can use the `time` function
  * to do some measurement yourself.
  */
 
@@ -69,17 +69,6 @@ class Timer {
     }
 
     /**
-     * Returns a time accurate relative to other times produced by this function.
-     * If possible, will use sub-millisecond precision.
-     * If not, will use millisecond precision.
-     * Not guaranteed to produce the same absolute values per-system.
-     * @returns {number} ms-scale accurate time relative to other relative times.
-     */
-    relativeTime () {
-        return this.nowObj.now();
-    }
-
-    /**
      * Start a timer for measuring elapsed time,
      * at the most accurate precision possible.
      */
@@ -89,6 +78,25 @@ class Timer {
 
     timeElapsed () {
         return this.nowObj.now() - this.startTime;
+    }
+
+    /**
+     * Call a handler function after a specified amount of time has elapsed.
+     * @param {function} handler - function to call after the timeout
+     * @param {number} timeout - number of milliseconds to delay before calling the handler
+     * @returns {number} - the ID of the new timeout
+     */
+    setTimeout (handler, timeout) {
+        return global.setTimeout(handler, timeout);
+    }
+
+    /**
+     * Clear a timeout from the pending timeout pool.
+     * @param {number} timeoutId - the ID returned by `setTimeout()`
+     * @memberof Timer
+     */
+    clearTimeout (timeoutId) {
+        global.clearTimeout(timeoutId);
     }
 }
 

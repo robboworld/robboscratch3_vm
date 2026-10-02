@@ -44,6 +44,7 @@ class Scratch3SensingBlocks {
         this.runtime.on('PROJECT_START', this._resetAnswer.bind(this));
         this.runtime.on('PROJECT_STOP_ALL', this._clearAllQuestions.bind(this));
         this.runtime.on('STOP_FOR_TARGET', this._clearTargetQuestions.bind(this));
+        this.runtime.on('RUNTIME_DISPOSED', this._resetAnswer.bind(this));
     }
 
     /**
@@ -191,6 +192,7 @@ class Scratch3SensingBlocks {
             targetX = util.ioQuery('mouse', 'getScratchX');
             targetY = util.ioQuery('mouse', 'getScratchY');
         } else {
+            args.DISTANCETOMENU = Cast.toString(args.DISTANCETOMENU);
             const distTarget = this.runtime.getSpriteTargetByName(
                 args.DISTANCETOMENU
             );
@@ -282,6 +284,7 @@ class Scratch3SensingBlocks {
         if (args.OBJECT === '_stage_') {
             attrTarget = this.runtime.getTargetForStage();
         } else {
+            args.OBJECT = Cast.toString(args.OBJECT);
             attrTarget = this.runtime.getSpriteTargetByName(args.OBJECT);
         }
 

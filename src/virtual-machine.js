@@ -1,4 +1,9 @@
-const TextEncoder = require('text-encoding').TextEncoder;
+let _TextEncoder;
+if (typeof TextEncoder === 'undefined') {
+    _TextEncoder = require('text-encoding').TextEncoder;
+} else {
+    _TextEncoder = TextEncoder;
+}
 const EventEmitter = require('events');
 const JSZip = require('jszip');
 
@@ -8,12 +13,8 @@ const ExtensionManager = require('./extension-support/extension-manager');
 const log = require('./util/log');
 const MathUtil = require('./util/math-util');
 const Runtime = require('./engine/runtime');
-const {SB1File, ValidationError} = require('scratch-sb1-converter');
-const sb2 = require('./serialization/sb2');
-const sb3 = require('./serialization/sb3');
 const StringUtil = require('./util/string-util');
 const formatMessage = require('format-message');
-const validate = require('scratch-parser');
 
 const Variable = require('./engine/variable');
 const newBlockIds = require('./util/new-block-ids');
@@ -21,6 +22,7 @@ const newBlockIds = require('./util/new-block-ids');
 const {loadCostume} = require('./import/load-costume.js');
 const {loadSound} = require('./import/load-sound.js');
 const {serializeSounds, serializeCostumes} = require('./serialization/serialize-assets');
+const sb3 = require('./serialization/sb3');
 const robboSimulatorProjectMeta = require('./robbo/robbo-simulator-project-meta');
 require('canvas-toBlob');
 
@@ -138,17 +140,26 @@ class VirtualMachine extends EventEmitter {
         this.runtime.on(Runtime.BLOCK_DRAG_END, (blocks, topBlockId) => {
             this.emit(Runtime.BLOCK_DRAG_END, blocks, topBlockId);
         });
-        this.runtime.on(Runtime.EXTENSION_ADDED, blocksInfo => {
-            this.emit(Runtime.EXTENSION_ADDED, blocksInfo);
+        this.runtime.on(Runtime.EXTENSION_ADDED, categoryInfo => {
+            this.emit(Runtime.EXTENSION_ADDED, categoryInfo);
         });
-        this.runtime.on(Runtime.BLOCKSINFO_UPDATE, blocksInfo => {
-            this.emit(Runtime.BLOCKSINFO_UPDATE, blocksInfo);
+        this.runtime.on(Runtime.EXTENSION_FIELD_ADDED, (fieldName, fieldImplementation) => {
+            this.emit(Runtime.EXTENSION_FIELD_ADDED, fieldName, fieldImplementation);
+        });
+        this.runtime.on(Runtime.BLOCKSINFO_UPDATE, categoryInfo => {
+            this.emit(Runtime.BLOCKSINFO_UPDATE, categoryInfo);
         });
         this.runtime.on(Runtime.BLOCKS_NEED_UPDATE, () => {
             this.emitWorkspaceUpdate();
         });
+        this.runtime.on(Runtime.TOOLBOX_EXTENSIONS_NEED_UPDATE, () => {
+            this.extensionManager.refreshBlocks();
+        });
         this.runtime.on(Runtime.PERIPHERAL_LIST_UPDATE, info => {
             this.emit(Runtime.PERIPHERAL_LIST_UPDATE, info);
+        });
+        this.runtime.on(Runtime.USER_PICKED_PERIPHERAL, info => {
+            this.emit(Runtime.USER_PICKED_PERIPHERAL, info);
         });
         this.runtime.on(Runtime.PERIPHERAL_CONNECTED, () =>
             this.emit(Runtime.PERIPHERAL_CONNECTED)
@@ -176,6 +187,11 @@ class VirtualMachine extends EventEmitter {
         });
 
         this.extensionManager = new ExtensionManager(this.runtime);
+
+        // Load core extensions
+        for (const id of CORE_EXTENSIONS) {
+            this.extensionManager.loadExtensionIdSync(id);
+        }
 
         this.blockListener = this.blockListener.bind(this);
         this.flyoutBlockListener = this.flyoutBlockListener.bind(this);
@@ -252,6 +268,14 @@ class VirtualMachine extends EventEmitter {
      */
     start () {
         this.runtime.start();
+    }
+
+    /**
+     * Quit the VM, clearing any handles which might keep the process alive.
+     * Do not use the runtime after calling this method. This method is meant for test shutdown.
+     */
+    quit () {
+        this.runtime.quit();
     }
 
     /**
@@ -629,6 +653,7 @@ class VirtualMachine extends EventEmitter {
         const validationPromise = this._whenRendererReady()
             .then(() => prepareSb3Repair())
             .then(() => new Promise((resolve, reject) => {
+                const validate = require('scratch-parser');
             // The second argument of false below indicates to the validator that the
             // input should be parsed/validated as an entire project (and not a single sprite)
             validate(loadInput, false, (error, res) => {
@@ -637,6 +662,8 @@ class VirtualMachine extends EventEmitter {
             });
         }))
             .catch(error => {
+                const {SB1File, ValidationError} = require('scratch-sb1-converter');
+
                 try {
                     const sb1 = new SB1File(loadInput);
                     const json = sb1.json;
@@ -659,10 +686,10 @@ class VirtualMachine extends EventEmitter {
 
         return validationPromise
             .then(validatedInput => this.deserializeProject(validatedInput[0], validatedInput[1]))
-            .then(() => this.runtime.emitProjectLoaded())
+            .then(() => this.runtime.handleProjectLoaded())
             .catch(error => {
                 // Intentionally rejecting here (want errors to be handled by caller)
-                if (error.hasOwnProperty('validationError')) {
+                if (Object.prototype.hasOwnProperty.call(error, 'validationError')) {
                     return Promise.reject(JSON.stringify(error));
                 }
                 return Promise.reject(error);
@@ -682,7 +709,11 @@ class VirtualMachine extends EventEmitter {
         const vm = this;
         const promise = storage.load(storage.AssetType.Project, id);
         promise.then(projectAsset => {
-            vm.loadProject(projectAsset.data);
+            if (!projectAsset) {
+                log.error(`Failed to fetch project with id: ${id}`);
+                return null;
+            }
+            return vm.loadProject(projectAsset.data);
         });
     }
 
@@ -704,6 +735,7 @@ class VirtualMachine extends EventEmitter {
 
         return zip.generateAsync({
             type: 'blob',
+            mimeType: 'application/x.scratch.sb3',
             compression: 'DEFLATE',
             compressionOptions: {
                 level: 6 // Tradeoff between best speed (1) and best compression (9)
@@ -772,7 +804,7 @@ class VirtualMachine extends EventEmitter {
     exportSprite (targetId, optZipType) {
         const soundDescs = serializeSounds(this.runtime, targetId);
         const costumeDescs = serializeCostumes(this.runtime, targetId);
-        const spriteJson = StringUtil.stringify(sb3.serialize(this.runtime, targetId));
+        const spriteJson = this.toJSON(targetId);
 
         const zip = new JSZip();
         zip.file('sprite.json', spriteJson);
@@ -780,6 +812,7 @@ class VirtualMachine extends EventEmitter {
 
         return zip.generateAsync({
             type: typeof optZipType === 'string' ? optZipType : 'blob',
+            mimeType: 'application/x.scratch.sprite3',
             compression: 'DEFLATE',
             compressionOptions: {
                 level: 6
@@ -788,10 +821,15 @@ class VirtualMachine extends EventEmitter {
     }
 
     /**
-     * Export project as a Scratch 3.0 JSON representation.
+     * Export project or sprite as a Scratch 3.0 JSON representation.
+     * @param {string=} optTargetId - Optional id of a sprite to serialize
      * @return {string} Serialized state of the runtime.
      */
-    toJSON () {
+    toJSON (optTargetId) {
+        if (optTargetId) {
+            return StringUtil.stringify(sb3.serialize(this.runtime, optTargetId));
+        }
+        // Whole project: include meta.robboSimulator
         return StringUtil.stringify(this.serializeProject());
     }
 
@@ -828,20 +866,33 @@ class VirtualMachine extends EventEmitter {
         // Clear the current runtime
         this.clear();
 
+        if (typeof performance !== 'undefined') {
+            performance.mark('scratch-vm-deserialize-start');
+        }
         const runtime = this.runtime;
         const deserializePromise = function () {
             const projectVersion = projectJSON.projectVersion;
             if (projectVersion === 2) {
+                const sb2 = require('./serialization/sb2');
                 return sb2.deserialize(projectJSON, runtime, false, zip);
             }
             if (projectVersion === 3) {
+                const sb3 = require('./serialization/sb3');
                 return sb3.deserialize(projectJSON, runtime, zip);
             }
+            // TODO: reject with an Error (possible breaking API change!)
+            // eslint-disable-next-line prefer-promise-reject-errors
             return Promise.reject('Unable to verify Scratch Project version.');
         };
         return deserializePromise()
-            .then(({targets, extensions}) =>
-                this.installTargets(targets, extensions, true))
+            .then(({targets, extensions}) => {
+                if (typeof performance !== 'undefined') {
+                    performance.mark('scratch-vm-deserialize-end');
+                    performance.measure('scratch-vm-deserialize',
+                        'scratch-vm-deserialize-start', 'scratch-vm-deserialize-end');
+                }
+                return this.installTargets(targets, extensions, true);
+            })
             .then(() => this._applyPendingRobboSimulatorMeta())
             .catch(err => {
                 this._pendingRobboSimulatorMeta = null;
@@ -858,14 +909,6 @@ class VirtualMachine extends EventEmitter {
      */
     installTargets (targets, extensions, wholeProject) {
         const extensionPromises = [];
-
-        if (wholeProject) {
-            CORE_EXTENSIONS.forEach(extensionID => {
-                if (!this.extensionManager.isExtensionLoaded(extensionID)) {
-                    extensionPromises.push(this.extensionManager.loadExtensionURL(extensionID));
-                }
-            });
-        }
 
         extensions.extensionIDs.forEach(extensionID => {
             if (!this.extensionManager.isExtensionLoaded(extensionID)) {
@@ -929,6 +972,7 @@ class VirtualMachine extends EventEmitter {
         }
 
         const validationPromise = new Promise((resolve, reject) => {
+            const validate = require('scratch-parser');
             // The second argument of true below indicates to the parser/validator
             // that the given input should be treated as a single sprite and not
             // an entire project
@@ -947,14 +991,18 @@ class VirtualMachine extends EventEmitter {
                 if (projectVersion === 3) {
                     return this._addSprite3(validatedInput[0], validatedInput[1]);
                 }
+                // TODO: reject with an Error (possible breaking API change!)
+                // eslint-disable-next-line prefer-promise-reject-errors
                 return Promise.reject(`${errorPrefix} Unable to verify sprite version.`);
             })
             .then(() => this.runtime.emitProjectChanged())
             .catch(error => {
                 // Intentionally rejecting here (want errors to be handled by caller)
-                if (error.hasOwnProperty('validationError')) {
+                if (Object.prototype.hasOwnProperty.call(error, 'validationError')) {
                     return Promise.reject(JSON.stringify(error));
                 }
+                // TODO: reject with an Error (possible breaking API change!)
+                // eslint-disable-next-line prefer-promise-reject-errors
                 return Promise.reject(`${errorPrefix} ${error}`);
             });
     }
@@ -968,6 +1016,7 @@ class VirtualMachine extends EventEmitter {
     _addSprite2 (sprite, zip) {
         // Validate & parse
 
+        const sb2 = require('./serialization/sb2');
         return sb2.deserialize(sprite, this.runtime, true, zip)
             .then(({targets, extensions}) =>
                 this.installTargets(targets, extensions, false));
@@ -981,7 +1030,7 @@ class VirtualMachine extends EventEmitter {
      */
     _addSprite3 (sprite, zip) {
         // Validate & parse
-
+        const sb3 = require('./serialization/sb3');
         return sb3
             .deserialize(sprite, this.runtime, zip, true)
             .then(({targets, extensions}) => this.installTargets(targets, extensions, false));
@@ -1012,6 +1061,8 @@ class VirtualMachine extends EventEmitter {
             });
         }
         // If the target cannot be found by id, return a rejected promise
+        // TODO: reject with an Error (possible breaking API change!)
+        // eslint-disable-next-line prefer-promise-reject-errors
         return Promise.reject();
     }
 
@@ -1026,6 +1077,8 @@ class VirtualMachine extends EventEmitter {
      * @returns {?Promise} - a promise that resolves when the costume has been added
      */
     addCostumeFromLibrary (md5ext, costumeObject) {
+        // TODO: reject with an Error (possible breaking API change!)
+        // eslint-disable-next-line prefer-promise-reject-errors
         if (!this.editingTarget) return Promise.reject();
         return this.addCostume(md5ext, costumeObject, this.editingTarget.id, 2 /* optVersion */);
     }
@@ -1054,7 +1107,7 @@ class VirtualMachine extends EventEmitter {
     duplicateSound (soundIndex) {
         const originalSound = this.editingTarget.getSounds()[soundIndex];
         const clone = Object.assign({}, originalSound);
-        return loadSound(clone, this.runtime, this.editingTarget.sprite).then(() => {
+        return loadSound(clone, this.runtime, this.editingTarget.sprite.soundBank).then(() => {
             this.editingTarget.addSound(clone, soundIndex + 1);
             this.emitTargetsUpdate();
         });
@@ -1099,7 +1152,7 @@ class VirtualMachine extends EventEmitter {
         const target = optTargetId ? this.runtime.getTargetById(optTargetId) :
             this.editingTarget;
         if (target) {
-            return loadSound(soundObject, this.runtime, target.sprite).then(() => {
+            return loadSound(soundObject, this.runtime, target.sprite.soundBank).then(() => {
                 target.addSound(soundObject);
                 this.emitTargetsUpdate();
             });
@@ -1139,6 +1192,7 @@ class VirtualMachine extends EventEmitter {
      */
     updateSoundBuffer (soundIndex, newBuffer, soundEncoding) {
         const sound = this.editingTarget.sprite.sounds[soundIndex];
+        if (sound && sound.broken) delete sound.broken;
         const id = sound ? sound.soundId : null;
         if (id && this.runtime && this.runtime.audioEngine) {
             this.editingTarget.sprite.soundBank.getSoundPlayer(id).buffer = newBuffer;
@@ -1162,6 +1216,8 @@ class VirtualMachine extends EventEmitter {
             sound.assetId = sound.asset.assetId;
             sound.dataFormat = storage.DataFormat.WAV;
             sound.md5 = `${sound.assetId}.${sound.dataFormat}`;
+            sound.sampleCount = newBuffer.length;
+            sound.rate = newBuffer.sampleRate;
         }
         // If soundEncoding is null, it's because gui had a problem
         // encoding the updated sound. We don't want to store anything in this
@@ -1222,14 +1278,18 @@ class VirtualMachine extends EventEmitter {
     updateBitmap (costumeIndex, bitmap, rotationCenterX, rotationCenterY, bitmapResolution) {
         const costume = this.editingTarget.getCostumes()[costumeIndex];
         if (!(costume && this.runtime && this.runtime.renderer)) return;
+        if (costume && costume.broken) delete costume.broken;
 
         costume.rotationCenterX = rotationCenterX;
         costume.rotationCenterY = rotationCenterY;
 
+        // If the bitmap originally had a zero width or height, use that value
+        const bitmapWidth = bitmap.sourceWidth === 0 ? 0 : bitmap.width;
+        const bitmapHeight = bitmap.sourceHeight === 0 ? 0 : bitmap.height;
         // @todo: updateBitmapSkin does not take ImageData
         const canvas = document.createElement('canvas');
-        canvas.width = bitmap.width;
-        canvas.height = bitmap.height;
+        canvas.width = bitmapWidth;
+        canvas.height = bitmapHeight;
         const context = canvas.getContext('2d');
         context.putImageData(bitmap, 0, 0);
 
@@ -1249,7 +1309,7 @@ class VirtualMachine extends EventEmitter {
                 const storage = this.runtime.storage;
                 costume.dataFormat = storage.DataFormat.PNG;
                 costume.bitmapResolution = bitmapResolution;
-                costume.size = [bitmap.width, bitmap.height];
+                costume.size = [bitmapWidth, bitmapHeight];
                 costume.asset = storage.createAsset(
                     storage.AssetType.ImageBitmap,
                     costume.dataFormat,
@@ -1261,7 +1321,10 @@ class VirtualMachine extends EventEmitter {
                 costume.md5 = `${costume.assetId}.${costume.dataFormat}`;
                 this.emitTargetsUpdate();
             });
-            reader.readAsArrayBuffer(blob);
+            // Bitmaps with a zero width or height return null for their blob
+            if (blob){
+                reader.readAsArrayBuffer(blob);
+            }
         });
     }
 
@@ -1274,6 +1337,7 @@ class VirtualMachine extends EventEmitter {
      */
     updateSvg (costumeIndex, svg, rotationCenterX, rotationCenterY) {
         const costume = this.editingTarget.getCostumes()[costumeIndex];
+        if (costume && costume.broken) delete costume.broken;
         if (costume && this.runtime && this.runtime.renderer) {
             costume.rotationCenterX = rotationCenterX;
             costume.rotationCenterY = rotationCenterY;
@@ -1288,7 +1352,7 @@ class VirtualMachine extends EventEmitter {
         costume.asset = storage.createAsset(
             storage.AssetType.ImageVector,
             costume.dataFormat,
-            (new TextEncoder()).encode(svg),
+            (new _TextEncoder()).encode(svg),
             null,
             true // generate md5
         );
@@ -1442,12 +1506,8 @@ class VirtualMachine extends EventEmitter {
         return this.runtime && this.runtime.renderer;
     }
 
-    /**
-     * Set the svg adapter for the VM/runtime, which converts scratch 2 svgs to scratch 3 svgs
-     * @param {!SvgRenderer} svgAdapter The adapter to attach
-     */
-    attachV2SVGAdapter (svgAdapter) {
-        this.runtime.attachV2SVGAdapter(svgAdapter);
+    // @deprecated
+    attachV2SVGAdapter () {
     }
 
     /**
@@ -1532,6 +1592,13 @@ class VirtualMachine extends EventEmitter {
     }
 
     /**
+     * Delete all of the flyout blocks.
+     */
+    clearFlyoutBlocks () {
+        this.runtime.flyoutBlocks.deleteAllBlocks();
+    }
+
+    /**
      * Set an editing target. An editor UI can use this function to switch
      * between editing different targets, sprites, etc.
      * After switching the editing target, the VM may emit updates
@@ -1564,6 +1631,8 @@ class VirtualMachine extends EventEmitter {
      * @return {!Promise} Promise that resolves when the extensions and blocks have been added.
      */
     shareBlocksToTarget (blocks, targetId, optFromTargetId) {
+        const sb3 = require('./serialization/sb3');
+
         const copiedBlocks = JSON.parse(JSON.stringify(blocks));
         newBlockIds(copiedBlocks);
         const target = this.runtime.getTargetById(targetId);
@@ -1627,7 +1696,7 @@ class VirtualMachine extends EventEmitter {
         const originalSound = this.editingTarget.getSounds()[soundIndex];
         const clone = Object.assign({}, originalSound);
         const target = this.runtime.getTargetById(targetId);
-        return loadSound(clone, this.runtime, target.sprite).then(() => {
+        return loadSound(clone, this.runtime, target.sprite.soundBank).then(() => {
             if (target) {
                 target.addSound(clone);
                 this.emitTargetsUpdate();
@@ -1687,7 +1756,7 @@ class VirtualMachine extends EventEmitter {
             targetList: this.runtime.targets
                 .filter(
                     // Don't report clones.
-                    target => !target.hasOwnProperty('isOriginal') || target.isOriginal
+                    target => !Object.prototype.hasOwnProperty.call(target, 'isOriginal') || target.isOriginal
                 ).map(
                     target => target.toJSON()
                 ),
@@ -1763,7 +1832,10 @@ class VirtualMachine extends EventEmitter {
      */
     getTargetIdForDrawableId (drawableId) {
         const target = this.runtime.getTargetByDrawableId(drawableId);
-        if (target && target.hasOwnProperty('id') && target.hasOwnProperty('isStage') && !target.isStage) {
+        if (target &&
+            Object.prototype.hasOwnProperty.call(target, 'id') &&
+            Object.prototype.hasOwnProperty.call(target, 'isStage') &&
+            !target.isStage) {
             return target.id;
         }
         return null;
@@ -1909,6 +1981,14 @@ class VirtualMachine extends EventEmitter {
             }
         }
         return null;
+    }
+
+    /**
+     * Allow VM consumer to configure the ScratchLink socket creator.
+     * @param {Function} factory The custom ScratchLink socket factory.
+     */
+    configureScratchLinkSocketFactory (factory) {
+        this.runtime.configureScratchLinkSocketFactory(factory);
     }
 }
 

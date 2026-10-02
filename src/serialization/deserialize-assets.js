@@ -18,7 +18,7 @@ const deserializeSound = function (sound, runtime, zip, assetFileName) {
     const fileName = assetFileName ? assetFileName : sound.md5;
     const storage = runtime.storage;
     if (!storage) {
-        log.error('No storage module present; cannot load sound asset: ', fileName);
+        log.warn('No storage module present; cannot load sound asset: ', fileName);
         return Promise.resolve(null);
     }
 
@@ -26,7 +26,13 @@ const deserializeSound = function (sound, runtime, zip, assetFileName) {
         return Promise.resolve(null);
     }
 
-    const soundFile = zip.file(fileName);
+    let soundFile = zip.file(fileName);
+    if (!soundFile) {
+        // look for assetfile in a flat list of files, or in a folder
+        const fileMatch = new RegExp(`^([^/]*/)?${fileName}$`);
+        soundFile = zip.file(fileMatch)[0]; // use first matching file
+    }
+
     if (!soundFile) {
         log.error(`Could not find sound file associated with the ${sound.name} sound.`);
         return Promise.resolve(null);
@@ -75,7 +81,7 @@ const deserializeCostume = function (costume, runtime, zip, assetFileName, textL
         `${assetId}.${costume.dataFormat}`;
 
     if (!storage) {
-        log.error('No storage module present; cannot load costume asset: ', fileName);
+        log.warn('No storage module present; cannot load costume asset: ', fileName);
         return Promise.resolve(null);
     }
 
@@ -100,7 +106,13 @@ const deserializeCostume = function (costume, runtime, zip, assetFileName, textL
         return Promise.resolve(null);
     }
 
-    const costumeFile = zip.file(fileName);
+    let costumeFile = zip.file(fileName);
+    if (!costumeFile) {
+        // look for assetfile in a flat list of files, or in a folder
+        const fileMatch = new RegExp(`^([^/]*/)?${fileName}$`);
+        costumeFile = zip.file(fileMatch)[0]; // use the first matched file
+    }
+
     if (!costumeFile) {
         log.error(`Could not find costume file associated with the ${costume.name} costume.`);
         return Promise.resolve(null);
