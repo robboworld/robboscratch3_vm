@@ -1,4 +1,5 @@
 const path = require('path');
+const webpack = require('webpack');
 
 const CopyWebpackPlugin = require('copy-webpack-plugin');
 
@@ -30,7 +31,16 @@ const webBuilder = new ScratchWebpackConfigBuilder(common)
         },
         resolve: {
             fallback: {
-                Buffer: require.resolve('buffer/')
+                Buffer: require.resolve('buffer/'),
+                // Robbo IoT blocks (mqtt) expect the Node built-ins webpack 4 used to polyfill
+                events: require.resolve('events/'),
+                process: require.resolve('process/browser'),
+                url: require.resolve('url/'),
+                util: require.resolve('util/'),
+                crypto: false,
+                fs: false,
+                net: false,
+                tls: false
             }
         },
         output: {
@@ -39,6 +49,9 @@ const webBuilder = new ScratchWebpackConfigBuilder(common)
             }
         }
     })
+    .addPlugin(new webpack.ProvidePlugin({
+        process: 'process/browser'
+    }))
     .addModuleRule({
         test: require.resolve('./src/index.js'),
         loader: 'expose-loader',
