@@ -39,10 +39,9 @@ test('importing sb3 project with monitors', t => {
         t.equal(monitorRecord.opcode, 'data_variable');
         t.equal(monitorRecord.mode, 'default');
         // The following few properties are imported for all monitors, just check once.
-        // sliderMin and sliderMax are currently not implemented,
-        // but should still get default values serialized and deserialized correctly
         t.equal(monitorRecord.sliderMin, 0);
         t.equal(monitorRecord.sliderMax, 100);
+        t.equal(monitorRecord.isDiscrete, true); // The default if not present
         t.equal(monitorRecord.x, 10);
         t.equal(monitorRecord.y, 62);
         // Height and width are only used for list monitors and should default to 0
@@ -248,8 +247,8 @@ test('importing sb3 project with monitors', t => {
         t.equal(monitorRecord.targetId, null);
         t.equal(vm.extensionManager.isExtensionLoaded('ev3'), true);
 
+        vm.quit();
         t.end();
-        process.nextTick(process.exit);
     });
 
     // Start VM, load project, and run

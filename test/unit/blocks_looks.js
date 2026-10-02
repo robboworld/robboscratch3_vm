@@ -15,7 +15,9 @@ const util = {
                 {name: 'second name'},
                 {name: 'third name'}
             ]
-        }
+        },
+        _customState: {},
+        getCustomState: () => util.target._customState
     }
 };
 
@@ -159,7 +161,7 @@ test('switch backdrop block runs correctly', t => {
     t.strictEqual(testBackdrop(['a', 'b', 'c', 'd'], -1), 3);
     t.strictEqual(testBackdrop(['a', 'b', 'c', 'd'], -4), 4);
     t.strictEqual(testBackdrop(['a', 'b', 'c', 'd'], 10), 2);
-    
+
     t.end();
 });
 
@@ -195,19 +197,81 @@ test('getBackdropNumberName can return costume name', t => {
     t.end();
 });
 
-test('numbers should be rounded to two decimals in say', t => {
+test('numbers should be rounded properly in say/think', t => {
     const rt = new Runtime();
     const looks = new Looks(rt);
 
-    const args = {MESSAGE: 3.14159};
-    const expectedSayString = '3.14';
+    let expectedSayString;
 
-    rt.removeAllListeners('SAY'); // Prevent say blocks from executing
-
-    rt.addListener('SAY', (target, type, sayString) => {
-        t.strictEqual(sayString, expectedSayString);
-        t.end();
+    rt.addListener('SAY', () => {
+        const bubbleState = util.target.getCustomState(Looks.STATE_KEY);
+        t.strictEqual(bubbleState.text, expectedSayString);
     });
 
-    looks.say(args, util);
+    expectedSayString = '3.14';
+    looks.say({MESSAGE: 3.14159}, util, 'say bubble should round to 2 decimal places');
+    looks.think({MESSAGE: 3.14159}, util, 'think bubble should round to 2 decimal places');
+
+    expectedSayString = '3';
+    looks.say({MESSAGE: 3}, util, 'say bubble should not add decimal places to integers');
+    looks.think({MESSAGE: 3}, util, 'think bubble should not add decimal places to integers');
+
+    expectedSayString = '3.10';
+    looks.say({MESSAGE: 3.1}, util, 'say bubble should round to 2 decimal places, even if only 1 is needed');
+    looks.think({MESSAGE: 3.1}, util, 'think bubble should round to 2 decimal places, even if only 1 is needed');
+
+    expectedSayString = '0.00125';
+    looks.say({MESSAGE: 0.00125}, util, 'say bubble should not round if it would display small numbers as 0');
+    looks.think({MESSAGE: 0.00125}, util, 'think bubble should not round if it would display small numbers as 0');
+
+    expectedSayString = '1.99999';
+    looks.say({MESSAGE: '1.99999'}, util, 'say bubble should not round strings');
+    looks.think({MESSAGE: '1.99999'}, util, 'think bubble should not round strings');
+
+    t.end();
+});
+
+test('clamp graphic effects', t => {
+    const rt = new Runtime();
+    const looks = new Looks(rt);
+    const expectedValues = {
+        brightness: {high: 100, low: -100},
+        ghost: {high: 100, low: 0},
+        color: {high: 500, low: -500},
+        fisheye: {high: 500, low: -500},
+        whirl: {high: 500, low: -500},
+        pixelate: {high: 500, low: -500},
+        mosaic: {high: 500, low: -500}
+    };
+    const args = [
+        {EFFECT: 'brightness', VALUE: 500, CLAMP: 'high'},
+        {EFFECT: 'brightness', VALUE: -500, CLAMP: 'low'},
+        {EFFECT: 'ghost', VALUE: 500, CLAMP: 'high'},
+        {EFFECT: 'ghost', VALUE: -500, CLAMP: 'low'},
+        {EFFECT: 'color', VALUE: 500, CLAMP: 'high'},
+        {EFFECT: 'color', VALUE: -500, CLAMP: 'low'},
+        {EFFECT: 'fisheye', VALUE: 500, CLAMP: 'high'},
+        {EFFECT: 'fisheye', VALUE: -500, CLAMP: 'low'},
+        {EFFECT: 'whirl', VALUE: 500, CLAMP: 'high'},
+        {EFFECT: 'whirl', VALUE: -500, CLAMP: 'low'},
+        {EFFECT: 'pixelate', VALUE: 500, CLAMP: 'high'},
+        {EFFECT: 'pixelate', VALUE: -500, CLAMP: 'low'},
+        {EFFECT: 'mosaic', VALUE: 500, CLAMP: 'high'},
+        {EFFECT: 'mosaic', VALUE: -500, CLAMP: 'low'}
+    ];
+
+    util.target.setEffect = function (effectName, actualValue) {
+        const clamp = actualValue > 0 ? 'high' : 'low';
+        rt.emit(effectName + clamp, effectName, actualValue);
+    };
+
+    for (const arg of args) {
+        rt.addListener(arg.EFFECT + arg.CLAMP, (effectName, actualValue) => {
+            const expected = expectedValues[arg.EFFECT][arg.CLAMP];
+            t.strictEqual(actualValue, expected);
+        });
+
+        looks.setEffect(arg, util);
+    }
+    t.end();
 });

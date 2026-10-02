@@ -1,12 +1,14 @@
 const EventEmitter = require('events');
 const {OrderedMap} = require('immutable');
-const escapeHtml = require('escape-html');
+const uuid = require('uuid');
 
 const ArgumentType = require('../extension-support/argument-type');
 const Blocks = require('./blocks');
+const BlocksRuntimeCache = require('./blocks-runtime-cache');
 const BlockType = require('../extension-support/block-type');
 const Profiler = require('./profiler');
 const Sequencer = require('./sequencer');
+const execute = require('./execute.js');
 const ScratchBlocksConstants = require('./scratch-blocks-constants');
 const TargetType = require('../extension-support/target-type');
 const Thread = require('./thread');
@@ -14,6 +16,9 @@ const log = require('../util/log');
 const maybeFormatMessage = require('../util/maybe-format-message');
 const StageLayering = require('./stage-layering');
 const Variable = require('./variable');
+const xmlEscape = require('../util/xml-escape');
+const ScratchLinkWebSocket = require('../util/scratch-link-websocket');
+const fetchWithTimeout = require('../util/fetch-with-timeout');
 
 // Virtual I/O devices.
 const Clock = require('../io/clock');
@@ -45,6 +50,8 @@ const defaultBlockPackages = {
     scratch3_iot: require('../blocks/scratch3_iot')
 };
 
+const defaultExtensionColors = ['#0FBD8C', '#0DA57A', '#0B8E69'];
+
 /**
  * Information used for converting Scratch argument types into scratch-blocks data.
  * @type {object.<ArgumentType, {shadowType: string, fieldType: string}>}
@@ -52,30 +59,55 @@ const defaultBlockPackages = {
 const ArgumentTypeMap = (() => {
     const map = {};
     map[ArgumentType.ANGLE] = {
-        shadowType: 'math_angle',
-        fieldType: 'NUM'
+        shadow: {
+            type: 'math_angle',
+            // We specify fieldNames here so that we can pick
+            // create and populate a field with the defaultValue
+            // specified in the extension.
+            // When the `fieldName` property is not specified,
+            // the <field></field> will be left out of the XML and
+            // the scratch-blocks defaults for that field will be
+            // used instead (e.g. default of 0 for number fields)
+            fieldName: 'NUM'
+        }
     };
     map[ArgumentType.COLOR] = {
-        shadowType: 'colour_picker'
+        shadow: {
+            type: 'colour_picker',
+            fieldName: 'COLOUR'
+        }
     };
     map[ArgumentType.NUMBER] = {
-        shadowType: 'math_number',
-        fieldType: 'NUM'
+        shadow: {
+            type: 'math_number',
+            fieldName: 'NUM'
+        }
     };
     map[ArgumentType.STRING] = {
-        shadowType: 'text',
-        fieldType: 'TEXT'
+        shadow: {
+            type: 'text',
+            fieldName: 'TEXT'
+        }
     };
     map[ArgumentType.BOOLEAN] = {
         check: 'Boolean'
     };
     map[ArgumentType.MATRIX] = {
-        shadowType: 'matrix',
-        fieldType: 'MATRIX'
+        shadow: {
+            type: 'matrix',
+            fieldName: 'MATRIX'
+        }
     };
     map[ArgumentType.NOTE] = {
-        shadowType: 'note',
-        fieldType: 'NOTE'
+        shadow: {
+            type: 'note',
+            fieldName: 'NOTE'
+        }
+    };
+    map[ArgumentType.IMAGE] = {
+        // Inline images are weird because they're not actually "arguments".
+        // They are more analagous to the label on a block.
+        fieldType: 'field_image'
     };
     return map;
 })();
@@ -126,16 +158,6 @@ const cloudDataManager = () => {
         removeCloudVariable,
         hasCloudVariables
     };
-};
-
-/**
- * Predefined "Converted block info" for a separator between blocks in a block category
- * @type {ConvertedBlockInfo}
- */
-const ConvertedSeparator = {
-    info: {},
-    json: null,
-    xml: '<sep gap="36"/>'
 };
 
 /**
@@ -357,7 +379,7 @@ class Runtime extends EventEmitter {
         // I/O related data.
         /** @type {Object.<string, Object>} */
         this.ioDevices = {
-            clock: new Clock(),
+            clock: new Clock(this),
             cloud: new Cloud(this),
             keyboard: new Keyboard(this),
             mouse: new Mouse(this),
@@ -404,7 +426,8 @@ class Runtime extends EventEmitter {
          * being added.
          * @type {function}
          */
-        this.addCloudVariable = this._initializeAddCloudVariable(newCloudDataManager);
+        this.addCloudVariable =
+            this._initializeAddCloudVariable(newCloudDataManager);
 
         /**
          * A function which updates the runtime's cloud variable limit
@@ -412,7 +435,19 @@ class Runtime extends EventEmitter {
          * if the last of the cloud variables is being removed.
          * @type {function}
          */
-        this.removeCloudVariable = this._initializeRemoveCloudVariable(newCloudDataManager);
+        this.removeCloudVariable =
+            this._initializeRemoveCloudVariable(newCloudDataManager);
+
+        /**
+         * A string representing the origin of the current project from outside of the
+         * Scratch community, such as CSFirst.
+         * @type {?string}
+         */
+        this.origin = null;
+
+        this._initScratchLink();
+
+        this.resetRunId();
     }
 
     /**
@@ -558,6 +593,14 @@ class Runtime extends EventEmitter {
     }
 
     /**
+     * Event name for report that a change was made to an extension in the toolbox.
+     * @const {string}
+     */
+    static get TOOLBOX_EXTENSIONS_NEED_UPDATE () {
+        return 'TOOLBOX_EXTENSIONS_NEED_UPDATE';
+    }
+
+    /**
      * Event name for targets update report.
      * @const {string}
      */
@@ -598,6 +641,14 @@ class Runtime extends EventEmitter {
     }
 
     /**
+     * Event name for reporting that an extension as asked for a custom field to be added
+     * @const {string}
+     */
+    static get EXTENSION_FIELD_ADDED () {
+        return 'EXTENSION_FIELD_ADDED';
+    }
+
+    /**
      * Event name for updating the available set of peripheral devices.
      * This causes the peripheral connection modal to update a list of
      * available peripherals.
@@ -605,6 +656,15 @@ class Runtime extends EventEmitter {
      */
     static get PERIPHERAL_LIST_UPDATE () {
         return 'PERIPHERAL_LIST_UPDATE';
+    }
+
+    /**
+     * Event name for when the user picks a bluetooth device to connect to
+     * via Companion Device Manager (CDM)
+     * @const {string}
+     */
+    static get USER_PICKED_PERIPHERAL () {
+        return 'USER_PICKED_PERIPHERAL';
     }
 
     /**
@@ -726,24 +786,24 @@ class Runtime extends EventEmitter {
     // Helper function for initializing the addCloudVariable function
     _initializeAddCloudVariable (newCloudDataManager) {
         // The addCloudVariable function
-        return (() => {
+        return () => {
             const hadCloudVarsBefore = this.hasCloudData();
             newCloudDataManager.addCloudVariable();
             if (!hadCloudVarsBefore && this.hasCloudData()) {
                 this.emit(Runtime.HAS_CLOUD_DATA_UPDATE, true);
             }
-        });
+        };
     }
 
     // Helper function for initializing the removeCloudVariable function
     _initializeRemoveCloudVariable (newCloudDataManager) {
-        return (() => {
+        return () => {
             const hadCloudVarsBefore = this.hasCloudData();
             newCloudDataManager.removeCloudVariable();
             if (hadCloudVarsBefore && !this.hasCloudData()) {
                 this.emit(Runtime.HAS_CLOUD_DATA_UPDATE, false);
             }
-        });
+        };
     }
 
     /**
@@ -753,14 +813,26 @@ class Runtime extends EventEmitter {
      */
     _registerBlockPackages () {
         for (const packageName in defaultBlockPackages) {
-            if (defaultBlockPackages.hasOwnProperty(packageName)) {
+            if (
+                Object.prototype.hasOwnProperty.call(
+                    defaultBlockPackages,
+                    packageName
+                )
+            ) {
                 // @todo pass a different runtime depending on package privilege?
-                const packageObject = new (defaultBlockPackages[packageName])(this);
+                const packageObject = new defaultBlockPackages[packageName](
+                    this
+                );
                 // Collect primitives from package.
                 if (packageObject.getPrimitives) {
                     const packagePrimitives = packageObject.getPrimitives();
                     for (const op in packagePrimitives) {
-                        if (packagePrimitives.hasOwnProperty(op)) {
+                        if (
+                            Object.prototype.hasOwnProperty.call(
+                                packagePrimitives,
+                                op
+                            )
+                        ) {
                             this._primitives[op] =
                                 packagePrimitives[op].bind(packageObject);
                         }
@@ -770,14 +842,23 @@ class Runtime extends EventEmitter {
                 if (packageObject.getHats) {
                     const packageHats = packageObject.getHats();
                     for (const hatName in packageHats) {
-                        if (packageHats.hasOwnProperty(hatName)) {
+                        if (
+                            Object.prototype.hasOwnProperty.call(
+                                packageHats,
+                                hatName
+                            )
+                        ) {
                             this._hats[hatName] = packageHats[hatName];
                         }
                     }
                 }
                 // Collect monitored from package.
                 if (packageObject.getMonitored) {
-                    this.monitorBlockInfo = Object.assign({}, this.monitorBlockInfo, packageObject.getMonitored());
+                    this.monitorBlockInfo = Object.assign(
+                        {},
+                        this.monitorBlockInfo,
+                        packageObject.getMonitored()
+                    );
                 }
             }
         }
@@ -795,7 +876,7 @@ class Runtime extends EventEmitter {
      * @private
      */
     _makeExtensionMenuId (menuName, extensionId) {
-        return `${extensionId}_menu_${escapeHtml(menuName)}`;
+        return `${extensionId}_menu_${xmlEscape(menuName)}`;
     }
 
     /**
@@ -807,7 +888,9 @@ class Runtime extends EventEmitter {
         const context = {};
         target = target || this.getEditingTarget() || this.getTargetForStage();
         if (target) {
-            context.targetType = (target.isStage ? TargetType.STAGE : TargetType.SPRITE);
+            context.targetType = target.isStage ?
+                TargetType.STAGE :
+                TargetType.SPRITE;
         }
     }
 
@@ -822,19 +905,42 @@ class Runtime extends EventEmitter {
             name: maybeFormatMessage(extensionInfo.name),
             showStatusButton: extensionInfo.showStatusButton,
             blockIconURI: extensionInfo.blockIconURI,
-            menuIconURI: extensionInfo.menuIconURI,
-            color1: extensionInfo.colour || '#0FBD8C',
-            color2: extensionInfo.colourSecondary || '#0DA57A',
-            color3: extensionInfo.colourTertiary || '#0B8E69',
-            blocks: [],
-            menus: []
+            menuIconURI: extensionInfo.menuIconURI
         };
+
+        if (extensionInfo.color1) {
+            categoryInfo.color1 = extensionInfo.color1;
+            categoryInfo.color2 = extensionInfo.color2;
+            categoryInfo.color3 = extensionInfo.color3;
+        } else {
+            categoryInfo.color1 = defaultExtensionColors[0];
+            categoryInfo.color2 = defaultExtensionColors[1];
+            categoryInfo.color3 = defaultExtensionColors[2];
+        }
 
         this._blockInfo.push(categoryInfo);
 
         this._fillExtensionCategory(categoryInfo, extensionInfo);
 
-        this.emit(Runtime.EXTENSION_ADDED, categoryInfo.blocks.concat(categoryInfo.menus));
+        for (const fieldTypeName in categoryInfo.customFieldTypes) {
+            if (
+                Object.prototype.hasOwnProperty.call(
+                    extensionInfo.customFieldTypes,
+                    fieldTypeName
+                )
+            ) {
+                const fieldTypeInfo =
+                    categoryInfo.customFieldTypes[fieldTypeName];
+
+                // Emit events for custom field types from extension
+                this.emit(Runtime.EXTENSION_FIELD_ADDED, {
+                    name: `field_${fieldTypeInfo.extendedName}`,
+                    implementation: fieldTypeInfo.fieldImplementation
+                });
+            }
+        }
+
+        this.emit(Runtime.EXTENSION_ADDED, categoryInfo);
     }
 
     /**
@@ -843,86 +949,147 @@ class Runtime extends EventEmitter {
      * @private
      */
     _refreshExtensionPrimitives (extensionInfo) {
-        let extensionBlocks = [];
-        for (const categoryInfo of this._blockInfo) {
-            if (extensionInfo.id === categoryInfo.id) {
-                categoryInfo.name = maybeFormatMessage(extensionInfo.name);
-                categoryInfo.blocks = [];
-                categoryInfo.menus = [];
-                this._fillExtensionCategory(categoryInfo, extensionInfo);
-                extensionBlocks = extensionBlocks.concat(categoryInfo.blocks, categoryInfo.menus);
-            }
-        }
+        const categoryInfo = this._blockInfo.find(
+            info => info.id === extensionInfo.id
+        );
+        if (categoryInfo) {
+            categoryInfo.name = maybeFormatMessage(extensionInfo.name);
+            this._fillExtensionCategory(categoryInfo, extensionInfo);
 
-        this.emit(Runtime.BLOCKSINFO_UPDATE, extensionBlocks);
+            this.emit(Runtime.BLOCKSINFO_UPDATE, categoryInfo);
+        }
     }
 
     /**
-     * Read extension information, convert menus and blocks, and store the results in the provided category object.
+     * Read extension information, convert menus, blocks and custom field types
+     * and store the results in the provided category object.
      * @param {CategoryInfo} categoryInfo - the category to be filled
      * @param {ExtensionMetadata} extensionInfo - the extension metadata to read
      * @private
      */
     _fillExtensionCategory (categoryInfo, extensionInfo) {
+        categoryInfo.blocks = [];
+        categoryInfo.customFieldTypes = {};
+        categoryInfo.menus = [];
+        categoryInfo.menuInfo = {};
+
         for (const menuName in extensionInfo.menus) {
-            if (extensionInfo.menus.hasOwnProperty(menuName)) {
-                const menuItems = extensionInfo.menus[menuName];
-                const convertedMenu = this._buildMenuForScratchBlocks(menuName, menuItems, categoryInfo);
+            if (
+                Object.prototype.hasOwnProperty.call(
+                    extensionInfo.menus,
+                    menuName
+                )
+            ) {
+                const menuInfo = extensionInfo.menus[menuName];
+                const convertedMenu = this._buildMenuForScratchBlocks(
+                    menuName,
+                    menuInfo,
+                    categoryInfo
+                );
                 categoryInfo.menus.push(convertedMenu);
+                categoryInfo.menuInfo[menuName] = menuInfo;
+            }
+        }
+        for (const fieldTypeName in extensionInfo.customFieldTypes) {
+            if (
+                Object.prototype.hasOwnProperty.call(
+                    extensionInfo.customFieldTypes,
+                    fieldTypeName
+                )
+            ) {
+                const fieldType = extensionInfo.customFieldTypes[fieldTypeName];
+                const fieldTypeInfo = this._buildCustomFieldInfo(
+                    fieldTypeName,
+                    fieldType,
+                    extensionInfo.id,
+                    categoryInfo
+                );
+
+                categoryInfo.customFieldTypes[fieldTypeName] = fieldTypeInfo;
             }
         }
 
         for (const blockInfo of extensionInfo.blocks) {
-            if (blockInfo === '---') {
-                categoryInfo.blocks.push(ConvertedSeparator);
-                continue;
-            }
             try {
-                const convertedBlock = this._convertForScratchBlocks(blockInfo, categoryInfo);
-                const opcode = convertedBlock.json.type;
+                const convertedBlock = this._convertForScratchBlocks(
+                    blockInfo,
+                    categoryInfo
+                );
                 categoryInfo.blocks.push(convertedBlock);
-                if (blockInfo.blockType !== BlockType.EVENT) {
-                    this._primitives[opcode] = convertedBlock.info.func;
-                }
-                if (blockInfo.blockType === BlockType.EVENT || blockInfo.blockType === BlockType.HAT) {
-                    this._hats[opcode] = {
-                        edgeActivated: blockInfo.isEdgeActivated,
-                        restartExistingThreads: blockInfo.shouldRestartExistingThreads
-                    };
+                if (convertedBlock.json) {
+                    const opcode = convertedBlock.json.type;
+                    if (blockInfo.blockType !== BlockType.EVENT) {
+                        this._primitives[opcode] = convertedBlock.info.func;
+                    }
+                    if (
+                        blockInfo.blockType === BlockType.EVENT ||
+                        blockInfo.blockType === BlockType.HAT
+                    ) {
+                        this._hats[opcode] = {
+                            edgeActivated: blockInfo.isEdgeActivated,
+                            restartExistingThreads:
+                                blockInfo.shouldRestartExistingThreads
+                        };
+                    }
                 }
             } catch (e) {
-                log.error('Error parsing block: ', {block: blockInfo, error: e});
+                log.error('Error parsing block: ', {
+                    block: blockInfo,
+                    error: e
+                });
             }
         }
     }
 
     /**
-     * Build the scratch-blocks JSON for a menu. Note that scratch-blocks treats menus as a special kind of block.
-     * @param {string} menuName - the name of the menu
-     * @param {array} menuItems - the list of items for this menu
-     * @param {CategoryInfo} categoryInfo - the category for this block
-     * @returns {object} - a JSON-esque object ready for scratch-blocks' consumption
+     * Convert the given extension menu items into the scratch-blocks style of list of pairs.
+     * If the menu is dynamic (e.g. the passed in argument is a function), return the input unmodified.
+     * @param {object} menuItems - an array of menu items or a function to retrieve such an array
+     * @returns {object} - an array of 2 element arrays or the original input function
      * @private
      */
-    _buildMenuForScratchBlocks (menuName, menuItems, categoryInfo) {
-        const menuId = this._makeExtensionMenuId(menuName, categoryInfo.id);
-        let options = null;
-        if (typeof menuItems === 'function') {
-            options = menuItems;
-        } else {
+    _convertMenuItems (menuItems) {
+        if (typeof menuItems !== 'function') {
             const extensionMessageContext = this.makeMessageContextForTarget();
-            options = menuItems.map(item => {
-                const formattedItem = maybeFormatMessage(item, extensionMessageContext);
+            return menuItems.map(item => {
+                const formattedItem = maybeFormatMessage(
+                    item,
+                    extensionMessageContext
+                );
                 switch (typeof formattedItem) {
                 case 'string':
                     return [formattedItem, formattedItem];
                 case 'object':
-                    return [maybeFormatMessage(item.text, extensionMessageContext), item.value];
+                    return [
+                        maybeFormatMessage(
+                            item.text,
+                            extensionMessageContext
+                        ),
+                        item.value
+                    ];
                 default:
-                    throw new Error(`Can't interpret menu item: ${JSON.stringify(item)}`);
+                    throw new Error(
+                        `Can't interpret menu item: ${JSON.stringify(item)}`
+                    );
                 }
             });
         }
+        return menuItems;
+    }
+
+    /**
+     * Build the scratch-blocks JSON for a menu. Note that scratch-blocks treats menus as a special kind of block.
+     * @param {string} menuName - the name of the menu
+     * @param {object} menuInfo - a description of this menu and its items
+     * @property {*} items - an array of menu items or a function to retrieve such an array
+     * @property {boolean} [acceptReporters] - if true, allow dropping reporters onto this menu
+     * @param {CategoryInfo} categoryInfo - the category for this block
+     * @returns {object} - a JSON-esque object ready for scratch-blocks' consumption
+     * @private
+     */
+    _buildMenuForScratchBlocks (menuName, menuInfo, categoryInfo) {
+        const menuId = this._makeExtensionMenuId(menuName, categoryInfo.id);
+        const menuItems = this._convertMenuItems(menuInfo.items);
         return {
             json: {
                 message0: '%1',
@@ -932,16 +1099,93 @@ class Runtime extends EventEmitter {
                 colour: categoryInfo.color1,
                 colourSecondary: categoryInfo.color2,
                 colourTertiary: categoryInfo.color3,
-                outputShape: ScratchBlocksConstants.OUTPUT_SHAPE_ROUND,
+                outputShape: menuInfo.acceptReporters ?
+                    ScratchBlocksConstants.OUTPUT_SHAPE_ROUND :
+                    ScratchBlocksConstants.OUTPUT_SHAPE_SQUARE,
                 args0: [
                     {
                         type: 'field_dropdown',
                         name: menuName,
-                        options: options
+                        options: menuItems
                     }
                 ]
             }
         };
+    }
+
+    _buildCustomFieldInfo (fieldName, fieldInfo, extensionId, categoryInfo) {
+        const extendedName = `${extensionId}_${fieldName}`;
+        return {
+            fieldName: fieldName,
+            extendedName: extendedName,
+            argumentTypeInfo: {
+                shadow: {
+                    type: extendedName,
+                    fieldName: `field_${extendedName}`
+                }
+            },
+            scratchBlocksDefinition: this._buildCustomFieldTypeForScratchBlocks(
+                extendedName,
+                fieldInfo.output,
+                fieldInfo.outputShape,
+                categoryInfo
+            ),
+            fieldImplementation: fieldInfo.implementation
+        };
+    }
+
+    /**
+     * Build the scratch-blocks JSON needed for a fieldType.
+     * Custom field types need to be namespaced to the extension so that extensions can't interfere with each other
+     * @param  {string} fieldName - The name of the field
+     * @param {string} output - The output of the field
+     * @param {number} outputShape - Shape of the field (from ScratchBlocksConstants)
+     * @param {object} categoryInfo - The category the field belongs to (Used to set its colors)
+     * @returns {object} - Object to be inserted into scratch-blocks
+     */
+    _buildCustomFieldTypeForScratchBlocks (
+        fieldName,
+        output,
+        outputShape,
+        categoryInfo
+    ) {
+        return {
+            json: {
+                type: fieldName,
+                message0: '%1',
+                inputsInline: true,
+                output: output,
+                colour: categoryInfo.color1,
+                colourSecondary: categoryInfo.color2,
+                colourTertiary: categoryInfo.color3,
+                outputShape: outputShape,
+                args0: [
+                    {
+                        name: `field_${fieldName}`,
+                        type: `field_${fieldName}`
+                    }
+                ]
+            }
+        };
+    }
+
+    /**
+     * Convert ExtensionBlockMetadata into data ready for scratch-blocks.
+     * @param {ExtensionBlockMetadata} blockInfo - the block info to convert
+     * @param {CategoryInfo} categoryInfo - the category for this block
+     * @returns {ConvertedBlockInfo} - the converted & original block information
+     * @private
+     */
+    _convertForScratchBlocks (blockInfo, categoryInfo) {
+        if (blockInfo === '---') {
+            return this._convertSeparatorForScratchBlocks(blockInfo);
+        }
+
+        if (blockInfo.blockType === BlockType.BUTTON) {
+            return this._convertButtonForScratchBlocks(blockInfo);
+        }
+
+        return this._convertBlockForScratchBlocks(blockInfo, categoryInfo);
     }
 
     /**
@@ -951,7 +1195,7 @@ class Runtime extends EventEmitter {
      * @returns {ConvertedBlockInfo} - the converted & original block information
      * @private
      */
-    _convertForScratchBlocks (blockInfo, categoryInfo) {
+    _convertBlockForScratchBlocks (blockInfo, categoryInfo) {
         const extendedOpcode = `${categoryInfo.id}_${blockInfo.opcode}`;
 
         const blockJSON = {
@@ -960,8 +1204,7 @@ class Runtime extends EventEmitter {
             category: categoryInfo.name,
             colour: categoryInfo.color1,
             colourSecondary: categoryInfo.color2,
-            colourTertiary: categoryInfo.color3,
-            extensions: ['scratch_extension']
+            colourTertiary: categoryInfo.color3
         };
         const context = {
             // TODO: store this somewhere so that we can map args appropriately after translation.
@@ -981,6 +1224,7 @@ class Runtime extends EventEmitter {
         const iconURI = blockInfo.blockIconURI || categoryInfo.blockIconURI;
 
         if (iconURI) {
+            blockJSON.extensions = ['scratch_extension'];
             blockJSON.message0 = '%1 %2';
             const iconJSON = {
                 type: 'field_image',
@@ -991,15 +1235,13 @@ class Runtime extends EventEmitter {
             const separatorJSON = {
                 type: 'field_vertical_separator'
             };
-            blockJSON.args0 = [
-                iconJSON,
-                separatorJSON
-            ];
+            blockJSON.args0 = [iconJSON, separatorJSON];
         }
 
         switch (blockInfo.blockType) {
         case BlockType.COMMAND:
-            blockJSON.outputShape = ScratchBlocksConstants.OUTPUT_SHAPE_SQUARE;
+            blockJSON.outputShape =
+                    ScratchBlocksConstants.OUTPUT_SHAPE_SQUARE;
             blockJSON.previousStatement = null; // null = available connection; undefined = hat
             if (!blockInfo.isTerminal) {
                 blockJSON.nextStatement = null; // null = available connection; undefined = terminal
@@ -1007,25 +1249,34 @@ class Runtime extends EventEmitter {
             break;
         case BlockType.REPORTER:
             blockJSON.output = 'String'; // TODO: distinguish number & string here?
-            blockJSON.outputShape = ScratchBlocksConstants.OUTPUT_SHAPE_ROUND;
+            blockJSON.outputShape =
+                    ScratchBlocksConstants.OUTPUT_SHAPE_ROUND;
             break;
         case BlockType.BOOLEAN:
             blockJSON.output = 'Boolean';
-            blockJSON.outputShape = ScratchBlocksConstants.OUTPUT_SHAPE_HEXAGONAL;
+            blockJSON.outputShape =
+                    ScratchBlocksConstants.OUTPUT_SHAPE_HEXAGONAL;
             break;
         case BlockType.HAT:
         case BlockType.EVENT:
-            if (!blockInfo.hasOwnProperty('isEdgeActivated')) {
+            if (
+                !Object.prototype.hasOwnProperty.call(
+                    blockInfo,
+                    'isEdgeActivated'
+                )
+            ) {
                 // if absent, this property defaults to true
                 blockInfo.isEdgeActivated = true;
             }
-            blockJSON.outputShape = ScratchBlocksConstants.OUTPUT_SHAPE_SQUARE;
+            blockJSON.outputShape =
+                    ScratchBlocksConstants.OUTPUT_SHAPE_SQUARE;
             blockJSON.nextStatement = null; // null = available connection; undefined = terminal
             break;
         case BlockType.CONDITIONAL:
         case BlockType.LOOP:
             blockInfo.branchCount = blockInfo.branchCount || 1;
-            blockJSON.outputShape = ScratchBlocksConstants.OUTPUT_SHAPE_SQUARE;
+            blockJSON.outputShape =
+                    ScratchBlocksConstants.OUTPUT_SHAPE_SQUARE;
             blockJSON.previousStatement = null; // null = available connection; undefined = hat
             if (!blockInfo.isTerminal) {
                 blockJSON.nextStatement = null; // null = available connection; undefined = terminal
@@ -1033,19 +1284,33 @@ class Runtime extends EventEmitter {
             break;
         }
 
-        const blockText = Array.isArray(blockInfo.text) ? blockInfo.text : [blockInfo.text];
+        const blockText = Array.isArray(blockInfo.text) ?
+            blockInfo.text :
+            [blockInfo.text];
         let inTextNum = 0; // text for the next block "arm" is blockText[inTextNum]
         let inBranchNum = 0; // how many branches have we placed into the JSON so far?
         let outLineNum = 0; // used for scratch-blocks `message${outLineNum}` and `args${outLineNum}`
-        const convertPlaceholders = this._convertPlaceholders.bind(this, context);
+        const convertPlaceholders = this._convertPlaceholders.bind(
+            this,
+            context
+        );
         const extensionMessageContext = this.makeMessageContextForTarget();
 
         // alternate between a block "arm" with text on it and an open slot for a substack
-        while (inTextNum < blockText.length || inBranchNum < blockInfo.branchCount) {
+        while (
+            inTextNum < blockText.length ||
+            inBranchNum < blockInfo.branchCount
+        ) {
             if (inTextNum < blockText.length) {
                 context.outLineNum = outLineNum;
-                const lineText = maybeFormatMessage(blockText[inTextNum], extensionMessageContext);
-                const convertedText = lineText.replace(/\[(.+?)]/g, convertPlaceholders);
+                const lineText = maybeFormatMessage(
+                    blockText[inTextNum],
+                    extensionMessageContext
+                );
+                const convertedText = lineText.replace(
+                    /\[(.+?)]/g,
+                    convertPlaceholders
+                );
                 if (blockJSON[`message${outLineNum}`]) {
                     blockJSON[`message${outLineNum}`] += convertedText;
                 } else {
@@ -1056,10 +1321,14 @@ class Runtime extends EventEmitter {
             }
             if (inBranchNum < blockInfo.branchCount) {
                 blockJSON[`message${outLineNum}`] = '%1';
-                blockJSON[`args${outLineNum}`] = [{
-                    type: 'input_statement',
-                    name: `SUBSTACK${inBranchNum > 0 ? inBranchNum + 1 : ''}`
-                }];
+                blockJSON[`args${outLineNum}`] = [
+                    {
+                        type: 'input_statement',
+                        name: `SUBSTACK${
+                            inBranchNum > 0 ? inBranchNum + 1 : ''
+                        }`
+                    }
+                ];
                 ++inBranchNum;
                 ++outLineNum;
             }
@@ -1073,23 +1342,100 @@ class Runtime extends EventEmitter {
             // Add icon to the bottom right of a loop block
             blockJSON[`lastDummyAlign${outLineNum}`] = 'RIGHT';
             blockJSON[`message${outLineNum}`] = '%1';
-            blockJSON[`args${outLineNum}`] = [{
-                type: 'field_image',
-                src: './static/blocks-media/repeat.svg', // TODO: use a constant or make this configurable?
-                width: 24,
-                height: 24,
-                alt: '*',
-                flip_rtl: true
-            }];
+            blockJSON[`args${outLineNum}`] = [
+                {
+                    type: 'field_image',
+                    src: './static/blocks-media/repeat.svg', // TODO: use a constant or make this configurable?
+                    width: 24,
+                    height: 24,
+                    alt: '*', // TODO remove this since we don't use collapsed blocks in scratch
+                    flip_rtl: true
+                }
+            ];
             ++outLineNum;
         }
 
-        const blockXML = `<block type="${extendedOpcode}">${context.inputList.join('')}</block>`;
+        const mutation = blockInfo.isDynamic ?
+            `<mutation blockInfo="${xmlEscape(JSON.stringify(blockInfo))}"/>` :
+            '';
+        const inputs = context.inputList.join('');
+        const blockXML = `<block type="${extendedOpcode}">${mutation}${inputs}</block>`;
 
         return {
             info: context.blockInfo,
             json: context.blockJSON,
             xml: blockXML
+        };
+    }
+
+    /**
+     * Generate a separator between blocks categories or sub-categories.
+     * @param {ExtensionBlockMetadata} blockInfo - the block to convert
+     * @param {CategoryInfo} categoryInfo - the category for this block
+     * @returns {ConvertedBlockInfo} - the converted & original block information
+     * @private
+     */
+    _convertSeparatorForScratchBlocks (blockInfo) {
+        return {
+            info: blockInfo,
+            xml: '<sep gap="36"/>'
+        };
+    }
+
+    /**
+     * Convert a button for scratch-blocks. A button has no opcode but specifies a callback name in the `func` field.
+     * @param {ExtensionBlockMetadata} buttonInfo - the button to convert
+     * @property {string} func - the callback name
+     * @param {CategoryInfo} categoryInfo - the category for this button
+     * @returns {ConvertedBlockInfo} - the converted & original button information
+     * @private
+     */
+    _convertButtonForScratchBlocks (buttonInfo) {
+        // for now we only support these pre-defined callbacks handled in scratch-blocks
+        const supportedCallbackKeys = [
+            'MAKE_A_LIST',
+            'MAKE_A_PROCEDURE',
+            'MAKE_A_VARIABLE'
+        ];
+        if (supportedCallbackKeys.indexOf(buttonInfo.func) < 0) {
+            log.error(
+                `Custom button callbacks not supported yet: ${buttonInfo.func}`
+            );
+        }
+
+        const extensionMessageContext = this.makeMessageContextForTarget();
+        const buttonText = maybeFormatMessage(
+            buttonInfo.text,
+            extensionMessageContext
+        );
+        return {
+            info: buttonInfo,
+            xml: `<button text="${buttonText}" callbackKey="${buttonInfo.func}"></button>`
+        };
+    }
+
+    /**
+     * Helper for _convertPlaceholdes which handles inline images which are a specialized case of block "arguments".
+     * @param {object} argInfo Metadata about the inline image as specified by the extension
+     * @return {object} JSON blob for a scratch-blocks image field.
+     * @private
+     */
+    _constructInlineImageJson (argInfo) {
+        if (!argInfo.dataURI) {
+            log.warn(
+                'Missing data URI in extension block with argument type IMAGE'
+            );
+        }
+        return {
+            type: 'field_image',
+            src: argInfo.dataURI || '',
+            // TODO these probably shouldn't be hardcoded...?
+            width: 24,
+            height: 24,
+            // Whether or not the inline image should be flipped horizontally
+            // in RTL languages. Defaults to false, indicating that the
+            // image will not be flipped.
+            flip_rtl: argInfo.flipRTL || false
         };
     }
 
@@ -1106,61 +1452,144 @@ class Runtime extends EventEmitter {
         // Sanitize the placeholder to ensure valid XML
         placeholder = placeholder.replace(/[<"&]/, '_');
 
-        const argJSON = {
-            type: 'input_value',
-            name: placeholder
-        };
-
+        // Determine whether the argument type is one of the known standard field types
         const argInfo = context.blockInfo.arguments[placeholder] || {};
-        const argTypeInfo = ArgumentTypeMap[argInfo.type] || {};
-        const defaultValue = (typeof argInfo.defaultValue === 'undefined' ?
-            '' :
-            escapeHtml(maybeFormatMessage(argInfo.defaultValue, this.makeMessageContextForTarget()).toString()));
+        let argTypeInfo = ArgumentTypeMap[argInfo.type] || {};
 
-        if (argTypeInfo.check) {
-            argJSON.check = argTypeInfo.check;
+        // Field type not a standard field type, see if extension has registered custom field type
+        if (
+            !ArgumentTypeMap[argInfo.type] &&
+            context.categoryInfo.customFieldTypes[argInfo.type]
+        ) {
+            argTypeInfo =
+                context.categoryInfo.customFieldTypes[argInfo.type]
+                    .argumentTypeInfo;
         }
 
-        const shadowType = (argInfo.menu ?
-            this._makeExtensionMenuId(argInfo.menu, context.categoryInfo.id) :
-            argTypeInfo.shadowType);
-        const fieldType = argInfo.menu || argTypeInfo.fieldType;
+        // Start to construct the scratch-blocks style JSON defining how the block should be
+        // laid out
+        let argJSON;
 
-        // <value> is the ScratchBlocks name for a block input.
-        context.inputList.push(`<value name="${placeholder}">`);
+        // Most field types are inputs (slots on the block that can have other blocks plugged into them)
+        // check if this is not one of those cases. E.g. an inline image on a block.
+        if (argTypeInfo.fieldType === 'field_image') {
+            argJSON = this._constructInlineImageJson(argInfo);
+        } else {
+            // Construct input value
 
-        // The <shadow> is a placeholder for a reporter and is visible when there's no reporter in this input.
-        // Boolean inputs don't need to specify a shadow in the XML.
-        if (shadowType) {
-            context.inputList.push(`<shadow type="${shadowType}">`);
+            // Layout a block argument (e.g. an input slot on the block)
+            argJSON = {
+                type: 'input_value',
+                name: placeholder
+            };
 
-            // <field> is a text field that the user can type into. Some shadows, like the color picker, don't allow
-            // text input and therefore don't need a field element.
-            if (fieldType) {
-                context.inputList.push(`<field name="${fieldType}">${defaultValue}</field>`);
+            const defaultValue =
+                typeof argInfo.defaultValue === 'undefined' ?
+                    '' :
+                    xmlEscape(
+                        maybeFormatMessage(
+                            argInfo.defaultValue,
+                            this.makeMessageContextForTarget()
+                        ).toString()
+                    );
+
+            if (argTypeInfo.check) {
+                // Right now the only type of 'check' we have specifies that the
+                // input slot on the block accepts Boolean reporters, so it should be
+                // shaped like a hexagon
+                argJSON.check = argTypeInfo.check;
             }
 
-            context.inputList.push('</shadow>');
+            let valueName;
+            let shadowType;
+            let fieldName;
+            if (argInfo.menu) {
+                const menuInfo = context.categoryInfo.menuInfo[argInfo.menu];
+                if (menuInfo.acceptReporters) {
+                    valueName = placeholder;
+                    shadowType = this._makeExtensionMenuId(
+                        argInfo.menu,
+                        context.categoryInfo.id
+                    );
+                    fieldName = argInfo.menu;
+                } else {
+                    argJSON.type = 'field_dropdown';
+                    argJSON.options = this._convertMenuItems(menuInfo.items);
+                    valueName = null;
+                    shadowType = null;
+                    fieldName = placeholder;
+                }
+            } else {
+                valueName = placeholder;
+                shadowType =
+                    (argTypeInfo.shadow && argTypeInfo.shadow.type) || null;
+                fieldName =
+                    (argTypeInfo.shadow && argTypeInfo.shadow.fieldName) ||
+                    null;
+            }
+
+            // <value> is the ScratchBlocks name for a block input.
+            if (valueName) {
+                context.inputList.push(`<value name="${placeholder}">`);
+            }
+
+            // The <shadow> is a placeholder for a reporter and is visible when there's no reporter in this input.
+            // Boolean inputs don't need to specify a shadow in the XML.
+            if (shadowType) {
+                context.inputList.push(`<shadow type="${shadowType}">`);
+            }
+
+            // A <field> displays a dynamic value: a user-editable text field, a drop-down menu, etc.
+            // Leave out the field if defaultValue or fieldName are not specified
+            if (defaultValue && fieldName) {
+                context.inputList.push(
+                    `<field name="${fieldName}">${defaultValue}</field>`
+                );
+            }
+
+            if (shadowType) {
+                context.inputList.push('</shadow>');
+            }
+
+            if (valueName) {
+                context.inputList.push('</value>');
+            }
         }
 
-        context.inputList.push('</value>');
-
         const argsName = `args${context.outLineNum}`;
-        const blockArgs = (context.blockJSON[argsName] = context.blockJSON[argsName] || []);
-        blockArgs.push(argJSON);
+        const blockArgs = (context.blockJSON[argsName] =
+            context.blockJSON[argsName] || []);
+        if (argJSON) blockArgs.push(argJSON);
         const argNum = blockArgs.length;
         context.argsMap[placeholder] = argNum;
+
         return `%${argNum}`;
     }
 
     /**
-     * @returns {string} scratch-blocks XML description for all dynamic blocks, wrapped in <category> elements.
+     * @returns {Array.<object>} scratch-blocks XML for each category of extension blocks, in category order.
+     * @param {?Target} [target] - the active editing target (optional)
+     * @property {string} id - the category / extension ID
+     * @property {string} xml - the XML text for this category, starting with `<category>` and ending with `</category>`
      */
-    getBlocksXML () {
-        const xmlParts = [];
-        for (const categoryInfo of this._blockInfo) {
+    getBlocksXML (target) {
+        return this._blockInfo.map(categoryInfo => {
             const {name, color1, color2} = categoryInfo;
-            const paletteBlocks = categoryInfo.blocks.filter(block => !block.info.hideFromPalette);
+            // Filter out blocks that aren't supposed to be shown on this target, as determined by the block info's
+            // `hideFromPalette` and `filter` properties.
+            const paletteBlocks = categoryInfo.blocks.filter(block => {
+                let blockFilterIncludesTarget = true;
+                // If an editing target is not passed, include all blocks
+                // If the block info doesn't include a `filter` property, always include it
+                if (target && block.info.filter) {
+                    blockFilterIncludesTarget = block.info.filter.includes(
+                        target.isStage ? TargetType.STAGE : TargetType.SPRITE
+                    );
+                }
+                // If the block info's `hideFromPalette` is true, then filter out this block
+                return blockFilterIncludesTarget && !block.info.hideFromPalette;
+            });
+
             const colorXML = `colour="${color1}" secondaryColour="${color2}"`;
 
             // Use a menu icon if there is one. Otherwise, use the block icon. If there's no icon,
@@ -1171,20 +1600,22 @@ class Runtime extends EventEmitter {
             } else if (categoryInfo.blockIconURI) {
                 menuIconURI = categoryInfo.blockIconURI;
             }
-            const menuIconXML = menuIconURI ?
-                `iconURI="${menuIconURI}"` : '';
+            const menuIconXML = menuIconURI ? `iconURI="${menuIconURI}"` : '';
 
             let statusButtonXML = '';
             if (categoryInfo.showStatusButton) {
                 statusButtonXML = 'showStatusButton="true"';
             }
 
-            xmlParts.push(`<category name="${name}" id="${categoryInfo.id}"
-                ${statusButtonXML} ${colorXML} ${menuIconXML}>`);
-            xmlParts.push.apply(xmlParts, paletteBlocks.map(block => block.xml));
-            xmlParts.push('</category>');
-        }
-        return xmlParts.join('\n');
+            return {
+                id: categoryInfo.id,
+                xml: `<category name="${name}" id="${
+                    categoryInfo.id
+                }" ${statusButtonXML} ${colorXML} ${menuIconXML}>${paletteBlocks
+                    .map(block => block.xml)
+                    .join('')}</category>`
+            };
+        });
     }
 
     /**
@@ -1192,7 +1623,85 @@ class Runtime extends EventEmitter {
      */
     getBlocksJSON () {
         return this._blockInfo.reduce(
-            (result, categoryInfo) => result.concat(categoryInfo.blocks.map(blockInfo => blockInfo.json)), []);
+            (result, categoryInfo) =>
+                result.concat(
+                    categoryInfo.blocks.map(blockInfo => blockInfo.json)
+                ),
+            []
+        );
+    }
+
+    /**
+     * One-time initialization for Scratch Link support.
+     */
+    _initScratchLink () {
+        // Check that we're actually in a real browser, not Node.js or JSDOM, and we have a valid-looking origin.
+        // note that `if (self?....)` will throw if `self` is undefined, so check for that first!
+        if (
+            typeof self !== 'undefined' &&
+            typeof document !== 'undefined' &&
+            document.getElementById &&
+            self.origin &&
+            self.origin !== 'null' && // note this is a string comparison, not a null check
+            self.navigator &&
+            self.navigator.userAgent &&
+            !(
+                self.navigator.userAgent.includes('Node.js') ||
+                self.navigator.userAgent.includes('jsdom')
+            )
+        ) {
+            // Create a script tag for the Scratch Link browser extension, unless one already exists
+            const scriptElement = document.getElementById(
+                'scratch-link-extension-script'
+            );
+            if (!scriptElement) {
+                const script = document.createElement('script');
+                script.id = 'scratch-link-extension-script';
+                document.body.appendChild(script);
+
+                // Tell the browser extension to inject its script.
+                // If the extension isn't present or isn't active, this will do nothing.
+                self.postMessage('inject-scratch-link-script', self.origin);
+            }
+        }
+    }
+
+    /**
+     * Get a scratch link socket.
+     * @param {string} type Either BLE or BT
+     * @returns {ScratchLinkSocket} The scratch link socket.
+     */
+    getScratchLinkSocket (type) {
+        const factory =
+            this._linkSocketFactory || this._defaultScratchLinkSocketFactory;
+        return factory(type);
+    }
+
+    /**
+     * Configure how ScratchLink sockets are created. Factory must consume a "type" parameter
+     * either BT or BLE.
+     * @param {Function} factory The new factory for creating ScratchLink sockets.
+     */
+    configureScratchLinkSocketFactory (factory) {
+        this._linkSocketFactory = factory;
+    }
+
+    /**
+     * The default scratch link socket creator, using websockets to the installed device manager.
+     * @param {string} type Either BLE or BT
+     * @returns {ScratchLinkSocket} The new scratch link socket (a WebSocket object)
+     */
+    _defaultScratchLinkSocketFactory (type) {
+        const Scratch = self.Scratch;
+        const ScratchLinkSafariSocket =
+            Scratch && Scratch.ScratchLinkSafariSocket;
+        // detect this every time in case the user turns on the extension after loading the page
+        const useSafariSocket =
+            ScratchLinkSafariSocket &&
+            ScratchLinkSafariSocket.isSafariHelperCompatible();
+        return useSafariSocket ?
+            new ScratchLinkSafariSocket(type) :
+            new ScratchLinkWebSocket(type);
     }
 
     /**
@@ -1272,7 +1781,7 @@ class Runtime extends EventEmitter {
      * @return {boolean} True if the op is known to be a hat.
      */
     getIsHat (opcode) {
-        return this._hats.hasOwnProperty(opcode);
+        return Object.prototype.hasOwnProperty.call(this._hats, opcode);
     }
 
     /**
@@ -1281,10 +1790,11 @@ class Runtime extends EventEmitter {
      * @return {boolean} True if the op is known to be a edge-activated hat.
      */
     getIsEdgeActivatedHat (opcode) {
-        return this._hats.hasOwnProperty(opcode) &&
-            this._hats[opcode].edgeActivated;
+        return (
+            Object.prototype.hasOwnProperty.call(this._hats, opcode) &&
+            this._hats[opcode].edgeActivated
+        );
     }
-
 
     /**
      * Attach the audio engine
@@ -1304,14 +1814,6 @@ class Runtime extends EventEmitter {
     }
 
     /**
-     * Set the svg adapter, which converts scratch 2 svgs to scratch 3 svgs
-     * @param {!SvgRenderer} svgAdapter The adapter to attach
-     */
-    attachV2SVGAdapter (svgAdapter) {
-        this.v2SvgAdapter = svgAdapter;
-    }
-
-    /**
      * Set the bitmap adapter for the VM/runtime, which converts scratch 2
      * bitmaps to scratch 3 bitmaps. (Scratch 3 bitmaps are all bitmap resolution 2)
      * @param {!function} bitmapAdapter The adapter to attach
@@ -1326,6 +1828,8 @@ class Runtime extends EventEmitter {
      */
     attachStorage (storage) {
         this.storage = storage;
+        fetchWithTimeout.setFetch(storage.scratchFetch.scratchFetch);
+        this.resetRunId();
     }
 
     // -----------------------------------------------------------------------------
@@ -1341,16 +1845,11 @@ class Runtime extends EventEmitter {
      * @return {!Thread} The newly created thread.
      */
     _pushThread (id, target, opts) {
-        opts = Object.assign({
-            stackClick: false,
-            updateMonitor: false
-        }, opts);
-
         const thread = new Thread(id);
         thread.target = target;
-        thread.stackClick = opts.stackClick;
-        thread.updateMonitor = opts.updateMonitor;
-        thread.blockContainer = opts.updateMonitor ?
+        thread.stackClick = Boolean(opts && opts.stackClick);
+        thread.updateMonitor = Boolean(opts && opts.updateMonitor);
+        thread.blockContainer = thread.updateMonitor ?
             this.monitorBlocks :
             target.blocks;
 
@@ -1400,10 +1899,10 @@ class Runtime extends EventEmitter {
      */
     isActiveThread (thread) {
         return (
-            (
-                thread.stack.length > 0 &&
-                thread.status !== Thread.STATUS_DONE) &&
-            this.threads.indexOf(thread) > -1);
+            thread.stack.length > 0 &&
+            thread.status !== Thread.STATUS_DONE &&
+            this.threads.indexOf(thread) > -1
+        );
     }
 
     /**
@@ -1428,18 +1927,29 @@ class Runtime extends EventEmitter {
      *     determines whether we show a visual report when turning on the script.
      */
     toggleScript (topBlockId, opts) {
-        opts = Object.assign({
-            target: this._editingTarget,
-            stackClick: false
-        }, opts);
+        opts = Object.assign(
+            {
+                target: this._editingTarget,
+                stackClick: false
+            },
+            opts
+        );
         // Remove any existing thread.
         for (let i = 0; i < this.threads.length; i++) {
             // Toggling a script that's already running turns it off
-            if (this.threads[i].topBlock === topBlockId && this.threads[i].status !== Thread.STATUS_DONE) {
+            if (
+                this.threads[i].topBlock === topBlockId &&
+                this.threads[i].status !== Thread.STATUS_DONE
+            ) {
                 const blockContainer = opts.target.blocks;
-                const opcode = blockContainer.getOpcode(blockContainer.getBlock(topBlockId));
+                const opcode = blockContainer.getOpcode(
+                    blockContainer.getBlock(topBlockId)
+                );
 
-                if (this.getIsEdgeActivatedHat(opcode) && this.threads[i].stackClick !== opts.stackClick) {
+                if (
+                    this.getIsEdgeActivatedHat(opcode) &&
+                    this.threads[i].stackClick !== opts.stackClick
+                ) {
                     // Allow edge activated hat thread stack click to coexist with
                     // edge activated hat thread that runs every frame
                     continue;
@@ -1461,8 +1971,11 @@ class Runtime extends EventEmitter {
         if (!optTarget) optTarget = this._editingTarget;
         for (let i = 0; i < this.threads.length; i++) {
             // Don't re-add the script if it's already running
-            if (this.threads[i].topBlock === topBlockId && this.threads[i].status !== Thread.STATUS_DONE &&
-                    this.threads[i].updateMonitor) {
+            if (
+                this.threads[i].topBlock === topBlockId &&
+                this.threads[i].status !== Thread.STATUS_DONE &&
+                this.threads[i].updateMonitor
+            ) {
                 return;
             }
         }
@@ -1493,6 +2006,23 @@ class Runtime extends EventEmitter {
         }
     }
 
+    allScriptsByOpcodeDo (opcode, f, optTarget) {
+        let targets = this.executableTargets;
+        if (optTarget) {
+            targets = [optTarget];
+        }
+        for (let t = targets.length - 1; t >= 0; t--) {
+            const target = targets[t];
+            const scripts = BlocksRuntimeCache.getScripts(
+                target.blocks,
+                opcode
+            );
+            for (let j = 0; j < scripts.length; j++) {
+                f(scripts[j], target);
+            }
+        }
+    }
+
     /**
      * Start all relevant hats.
      * @param {!string} requestedHatOpcode Opcode of hats to start.
@@ -1500,92 +2030,95 @@ class Runtime extends EventEmitter {
      * @param {Target=} optTarget Optionally, a target to restrict to.
      * @return {Array.<Thread>} List of threads started by this function.
      */
-    startHats (requestedHatOpcode,
-        optMatchFields, optTarget) {
-        if (!this._hats.hasOwnProperty(requestedHatOpcode)) {
+    startHats (requestedHatOpcode, optMatchFields, optTarget) {
+        if (
+            !Object.prototype.hasOwnProperty.call(
+                this._hats,
+                requestedHatOpcode
+            )
+        ) {
             // No known hat with this opcode.
             return;
         }
         const instance = this;
         const newThreads = [];
+        // Look up metadata for the relevant hat.
+        const hatMeta = instance._hats[requestedHatOpcode];
 
         for (const opts in optMatchFields) {
-            if (!optMatchFields.hasOwnProperty(opts)) continue;
+            if (!Object.prototype.hasOwnProperty.call(optMatchFields, opts)) {
+                continue;
+            }
             optMatchFields[opts] = optMatchFields[opts].toUpperCase();
         }
 
         // Consider all scripts, looking for hats with opcode `requestedHatOpcode`.
-        this.allScriptsDo((topBlockId, target) => {
-            const blocks = target.blocks;
-            const block = blocks.getBlock(topBlockId);
-            const potentialHatOpcode = block.opcode;
-            if (potentialHatOpcode !== requestedHatOpcode) {
-                // Not the right hat.
-                return;
-            }
+        this.allScriptsByOpcodeDo(
+            requestedHatOpcode,
+            (script, target) => {
+                const {blockId: topBlockId, fieldsOfInputs: hatFields} =
+                    script;
 
-            // Match any requested fields.
-            // For example: ensures that broadcasts match.
-            // This needs to happen before the block is evaluated
-            // (i.e., before the predicate can be run) because "broadcast and wait"
-            // needs to have a precise collection of started threads.
-            let hatFields = blocks.getFields(block);
-
-            // If no fields are present, check inputs (horizontal blocks)
-            if (Object.keys(hatFields).length === 0) {
-                hatFields = {}; // don't overwrite the block's actual fields list
-                const hatInputs = blocks.getInputs(block);
-                for (const input in hatInputs) {
-                    if (!hatInputs.hasOwnProperty(input)) continue;
-                    const id = hatInputs[input].block;
-                    const inpBlock = blocks.getBlock(id);
-                    const fields = blocks.getFields(inpBlock);
-                    Object.assign(hatFields, fields);
-                }
-            }
-
-            if (optMatchFields) {
+                // Match any requested fields.
+                // For example: ensures that broadcasts match.
+                // This needs to happen before the block is evaluated
+                // (i.e., before the predicate can be run) because "broadcast and wait"
+                // needs to have a precise collection of started threads.
                 for (const matchField in optMatchFields) {
-                    if (hatFields[matchField].value.toUpperCase() !==
-                        optMatchFields[matchField]) {
+                    if (
+                        hatFields[matchField].value !==
+                        optMatchFields[matchField]
+                    ) {
                         // Field mismatch.
                         return;
                     }
                 }
-            }
 
-            // Look up metadata for the relevant hat.
-            const hatMeta = instance._hats[requestedHatOpcode];
-            if (hatMeta.restartExistingThreads) {
-                // If `restartExistingThreads` is true, we should stop
-                // any existing threads starting with the top block.
-                for (let i = 0; i < instance.threads.length; i++) {
-                    if (instance.threads[i].topBlock === topBlockId &&
-                        !instance.threads[i].stackClick && // stack click threads and hat threads can coexist
-                        instance.threads[i].target === target) {
-                        newThreads.push(instance._restartThread(instance.threads[i]));
-                        return;
+                if (hatMeta.restartExistingThreads) {
+                    // If `restartExistingThreads` is true, we should stop
+                    // any existing threads starting with the top block.
+                    for (let i = 0; i < this.threads.length; i++) {
+                        if (
+                            this.threads[i].target === target &&
+                            this.threads[i].topBlock === topBlockId &&
+                            // stack click threads and hat threads can coexist
+                            !this.threads[i].stackClick
+                        ) {
+                            newThreads.push(
+                                this._restartThread(this.threads[i])
+                            );
+                            return;
+                        }
+                    }
+                } else {
+                    // If `restartExistingThreads` is false, we should
+                    // give up if any threads with the top block are running.
+                    for (let j = 0; j < this.threads.length; j++) {
+                        if (
+                            this.threads[j].target === target &&
+                            this.threads[j].topBlock === topBlockId &&
+                            // stack click threads and hat threads can coexist
+                            !this.threads[j].stackClick &&
+                            this.threads[j].status !== Thread.STATUS_DONE
+                        ) {
+                            // Some thread is already running.
+                            return;
+                        }
                     }
                 }
-            } else {
-                // If `restartExistingThreads` is false, we should
-                // give up if any threads with the top block are running.
-                for (let j = 0; j < instance.threads.length; j++) {
-                    if (instance.threads[j].topBlock === topBlockId &&
-                        instance.threads[j].target === target &&
-                        !instance.threads[j].stackClick && // stack click threads and hat threads can coexist
-                        instance.threads[j].status !== Thread.STATUS_DONE) {
-                        // Some thread is already running.
-                        return;
-                    }
-                }
-            }
-            // Start the thread with this top block.
-            newThreads.push(instance._pushThread(topBlockId, target));
-        }, optTarget);
+                // Start the thread with this top block.
+                newThreads.push(this._pushThread(topBlockId, target));
+            },
+            optTarget
+        );
+        // For compatibility with Scratch 2, edge triggered hats need to be processed before
+        // threads are stepped. See ScratchRuntime.as for original implementation
+        newThreads.forEach(thread => {
+            execute(this.sequencer, thread);
+            thread.goToNextBlock();
+        });
         return newThreads;
     }
-
 
     /**
      * Dispose all targets. Return to clean state.
@@ -1600,6 +2133,7 @@ class Runtime extends EventEmitter {
         this.targets.map(this.disposeTarget, this);
         this._monitorState = OrderedMap({});
         this.emit(Runtime.RUNTIME_DISPOSED);
+        this.ioDevices.clock.resetProjectTimer();
         // @todo clear out extensions? turboMode? etc.
 
         // *********** Cloud *******************
@@ -1617,8 +2151,10 @@ class Runtime extends EventEmitter {
         const newCloudDataManager = cloudDataManager();
         this.hasCloudData = newCloudDataManager.hasCloudVariables;
         this.canAddCloudVariable = newCloudDataManager.canAddCloudVariable;
-        this.addCloudVariable = this._initializeAddCloudVariable(newCloudDataManager);
-        this.removeCloudVariable = this._initializeRemoveCloudVariable(newCloudDataManager);
+        this.addCloudVariable =
+            this._initializeAddCloudVariable(newCloudDataManager);
+        this.removeCloudVariable =
+            this._initializeRemoveCloudVariable(newCloudDataManager);
     }
 
     /**
@@ -1650,7 +2186,10 @@ class Runtime extends EventEmitter {
             newIndex = this.executableTargets.length;
         }
         if (newIndex <= 0) {
-            if (this.executableTargets.length > 0 && this.executableTargets[0].isStage) {
+            if (
+                this.executableTargets.length > 0 &&
+                this.executableTargets[0].isStage
+            ) {
                 newIndex = 1;
             } else {
                 newIndex = 0;
@@ -1721,6 +2260,22 @@ class Runtime extends EventEmitter {
     }
 
     /**
+     * Reset the Run ID. Call this any time the project logically starts, stops, or changes identity.
+     */
+    resetRunId () {
+        if (!this.storage) {
+            // see also: attachStorage
+            return;
+        }
+
+        const newRunId = uuid.v1();
+        this.storage.scratchFetch.setMetadata(
+            this.storage.scratchFetch.RequestMetadata.RunId,
+            newRunId
+        );
+    }
+
+    /**
      * Start all threads that start with the green flag.
      */
     greenFlag () {
@@ -1746,16 +2301,27 @@ class Runtime extends EventEmitter {
         const newTargets = [];
         for (let i = 0; i < this.targets.length; i++) {
             this.targets[i].onStopAll();
-            if (this.targets[i].hasOwnProperty('isOriginal') &&
-                !this.targets[i].isOriginal) {
+            if (
+                Object.prototype.hasOwnProperty.call(
+                    this.targets[i],
+                    'isOriginal'
+                ) &&
+                !this.targets[i].isOriginal
+            ) {
                 this.targets[i].dispose();
             } else {
                 newTargets.push(this.targets[i]);
             }
         }
         this.targets = newTargets;
-        // Dispose all threads.
-        this.threads.forEach(thread => this._stopThread(thread));
+        // Dispose of the active thread.
+        if (this.sequencer.activeThread !== null) {
+            this._stopThread(this.sequencer.activeThread);
+        }
+        // Remove all remaining threads from executing in the next tick.
+        this.threads = [];
+
+        this.resetRunId();
     }
 
     /**
@@ -1780,7 +2346,9 @@ class Runtime extends EventEmitter {
 
         // Find all edge-activated hats, and add them to threads to be evaluated.
         for (const hatType in this._hats) {
-            if (!this._hats.hasOwnProperty(hatType)) continue;
+            if (!Object.prototype.hasOwnProperty.call(this._hats, hatType)) {
+                continue;
+            }
             const hat = this._hats[hatType];
             if (hat.edgeActivated) {
                 this.startHats(hatType);
@@ -1790,7 +2358,9 @@ class Runtime extends EventEmitter {
         this._pushMonitors();
         if (this.profiler !== null) {
             if (stepThreadsProfilerId === -1) {
-                stepThreadsProfilerId = this.profiler.idByName('Sequencer.stepThreads');
+                stepThreadsProfilerId = this.profiler.idByName(
+                    'Sequencer.stepThreads'
+                );
             }
             this.profiler.start(stepThreadsProfilerId);
         }
@@ -1817,8 +2387,10 @@ class Runtime extends EventEmitter {
         // Add done threads so that even if a thread finishes within 1 frame, the green
         // flag will still indicate that a script ran.
         this._emitProjectRunStatus(
-            this.threads.length + doneThreads.length -
-                this._getMonitorThreadCount([...this.threads, ...doneThreads]));
+            this.threads.length +
+                doneThreads.length -
+                this._getMonitorThreadCount([...this.threads, ...doneThreads])
+        );
         // Store threads that completed this iteration for testing and other
         // internal purposes.
         this._lastStepDoneThreads = doneThreads;
@@ -1826,7 +2398,8 @@ class Runtime extends EventEmitter {
             // @todo: Only render when this.redrawRequested or clones rendered.
             if (this.profiler !== null) {
                 if (rendererDrawProfilerId === -1) {
-                    rendererDrawProfilerId = this.profiler.idByName('RenderWebGL.draw');
+                    rendererDrawProfilerId =
+                        this.profiler.idByName('RenderWebGL.draw');
                 }
                 this.profiler.start(rendererDrawProfilerId);
             }
@@ -1837,7 +2410,10 @@ class Runtime extends EventEmitter {
         }
 
         if (this._refreshTargets) {
-            this.emit(Runtime.TARGETS_UPDATE, false /* Don't emit project changed */);
+            this.emit(
+                Runtime.TARGETS_UPDATE,
+                false /* Don't emit project changed */
+            );
             this._refreshTargets = false;
         }
 
@@ -1884,10 +2460,15 @@ class Runtime extends EventEmitter {
      * @param {!Target} editingTarget New editing target.
      */
     setEditingTarget (editingTarget) {
+        const oldEditingTarget = this._editingTarget;
         this._editingTarget = editingTarget;
         // Script glows must be cleared.
         this._scriptGlowsPreviousFrame = [];
         this._updateGlows();
+
+        if (oldEditingTarget !== this._editingTarget) {
+            this.requestToolboxExtensionsUpdate();
+        }
     }
 
     /**
@@ -1928,9 +2509,9 @@ class Runtime extends EventEmitter {
      */
     _updateGlows (optExtraThreads) {
         const searchThreads = [];
-        searchThreads.push.apply(searchThreads, this.threads);
+        searchThreads.push(...this.threads);
         if (optExtraThreads) {
-            searchThreads.push.apply(searchThreads, optExtraThreads);
+            searchThreads.push(...optExtraThreads);
         }
         // Set of scripts that request a glow this frame.
         const requestedGlowsThisFrame = [];
@@ -1943,12 +2524,12 @@ class Runtime extends EventEmitter {
             if (target === this._editingTarget) {
                 const blockForThread = thread.blockGlowInFrame;
                 if (thread.requestScriptGlowInFrame || thread.stackClick) {
-                    let script = target.blocks.getTopLevelScript(blockForThread);
+                    let script =
+                        target.blocks.getTopLevelScript(blockForThread);
                     if (!script) {
                         // Attempt to find in flyout blocks.
-                        script = this.flyoutBlocks.getTopLevelScript(
-                            blockForThread
-                        );
+                        script =
+                            this.flyoutBlocks.getTopLevelScript(blockForThread);
                     }
                     if (script) {
                         requestedGlowsThisFrame.push(script);
@@ -2066,7 +2647,8 @@ class Runtime extends EventEmitter {
      */
     requestAddMonitor (monitor) {
         const id = monitor.get('id');
-        if (!this.requestUpdateMonitor(monitor)) { // update monitor if it exists in the state
+        if (!this.requestUpdateMonitor(monitor)) {
+            // update monitor if it exists in the state
             // if the monitor did not exist in the state, add it
             this._monitorState = this._monitorState.set(id, monitor);
         }
@@ -2084,12 +2666,15 @@ class Runtime extends EventEmitter {
         if (this._monitorState.has(id)) {
             this._monitorState =
                 // Use mergeWith here to prevent undefined values from overwriting existing ones
-                this._monitorState.set(id, this._monitorState.get(id).mergeWith((prev, next) => {
-                    if (typeof next === 'undefined' || next === null) {
-                        return prev;
-                    }
-                    return next;
-                }, monitor));
+                this._monitorState.set(
+                    id,
+                    this._monitorState.get(id).mergeWith((prev, next) => {
+                        if (typeof next === 'undefined' || next === null) {
+                            return prev;
+                        }
+                        return next;
+                    }, monitor)
+                );
             return true;
         }
         return false;
@@ -2110,10 +2695,12 @@ class Runtime extends EventEmitter {
      * @return {boolean} true if monitor exists and was updated, false otherwise
      */
     requestHideMonitor (monitorId) {
-        return this.requestUpdateMonitor(new Map([
-            ['id', monitorId],
-            ['visible', false]
-        ]));
+        return this.requestUpdateMonitor(
+            new Map([
+                ['id', monitorId],
+                ['visible', false]
+            ])
+        );
     }
 
     /**
@@ -2123,10 +2710,12 @@ class Runtime extends EventEmitter {
      * @return {boolean} true if monitor exists and was updated, false otherwise
      */
     requestShowMonitor (monitorId) {
-        return this.requestUpdateMonitor(new Map([
-            ['id', monitorId],
-            ['visible', true]
-        ]));
+        return this.requestUpdateMonitor(
+            new Map([
+                ['id', monitorId],
+                ['visible', true]
+            ])
+        );
     }
 
     /**
@@ -2135,7 +2724,9 @@ class Runtime extends EventEmitter {
      * @param {!string} targetId Remove all monitors with given target ID.
      */
     requestRemoveMonitorByTargetId (targetId) {
-        this._monitorState = this._monitorState.filterNot(value => value.targetId === targetId);
+        this._monitorState = this._monitorState.filterNot(
+            value => value.targetId === targetId
+        );
     }
 
     /**
@@ -2198,10 +2789,11 @@ class Runtime extends EventEmitter {
     }
 
     /**
-     * Report that the project has loaded in the Virtual Machine.
+     * Handle that the project has loaded in the Virtual Machine.
      */
-    emitProjectLoaded () {
+    handleProjectLoaded () {
         this.emit(Runtime.PROJECT_LOADED);
+        this.resetRunId();
     }
 
     /**
@@ -2254,7 +2846,10 @@ class Runtime extends EventEmitter {
     getAllVarNamesOfType (varType) {
         let varNames = [];
         for (const target of this.targets) {
-            const targetVarNames = target.getAllVariableNamesInScopeByType(varType, true);
+            const targetVarNames = target.getAllVariableNamesInScopeByType(
+                varType,
+                true
+            );
             varNames = varNames.concat(targetVarNames);
         }
         return varNames;
@@ -2295,7 +2890,8 @@ class Runtime extends EventEmitter {
      * @return {Variable} The new variable that was created.
      */
     createNewGlobalVariable (variableName, optVarId, optVarType) {
-        const varType = (typeof optVarType === 'string') ? optVarType : Variable.SCALAR_TYPE;
+        const varType =
+            typeof optVarType === 'string' ? optVarType : Variable.SCALAR_TYPE;
         const allVariableNames = this.getAllVarNamesOfType(varType);
         const newName = StringUtil.unusedName(variableName, allVariableNames);
         const variable = new Variable(optVarId || uid(), newName, varType);
@@ -2323,7 +2919,7 @@ class Runtime extends EventEmitter {
     }
 
     /**
-     * Emit an event that indicate that the blocks on the workspace need updating.
+     * Emit an event that indicates that the blocks on the workspace need updating.
      */
     requestBlocksUpdate () {
         this.emit(Runtime.BLOCKS_NEED_UPDATE);
@@ -2340,6 +2936,13 @@ class Runtime extends EventEmitter {
     }
 
     /**
+     * Emit an event that indicates that the toolbox extension blocks need updating.
+     */
+    requestToolboxExtensionsUpdate () {
+        this.emit(Runtime.TOOLBOX_EXTENSIONS_NEED_UPDATE);
+    }
+
+    /**
      * Set up timers to repeatedly step in a browser.
      */
     start () {
@@ -2352,6 +2955,15 @@ class Runtime extends EventEmitter {
             this._step();
         }, interval);
         this.emit(Runtime.RUNTIME_STARTED);
+    }
+
+    /**
+     * Quit the Runtime, clearing any handles which might keep the process alive.
+     * Do not use the runtime after calling this method. This method is meant for test shutdown.
+     */
+    quit () {
+        clearInterval(this._steppingInterval);
+        this._steppingInterval = null;
     }
 
     /**

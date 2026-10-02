@@ -1,6 +1,6 @@
-const log = require('../util/log');
 const MathUtil = require('../util/math-util');
 const StringUtil = require('../util/string-util');
+const Cast = require('../util/cast');
 const Clone = require('../util/clone');
 const Target = require('../engine/target');
 const StageLayering = require('../engine/stage-layering');
@@ -273,9 +273,7 @@ class RenderedTarget extends Target {
             this.x = position[0];
             this.y = position[1];
 
-            this.renderer.updateDrawableProperties(this.drawableID, {
-                position: position
-            });
+            this.renderer.updateDrawablePosition(this.drawableID, position);
             if (this.visible) {
                 this.emit(RenderedTarget.EVENT_TARGET_VISUAL_CHANGE, this);
                 this.runtime.requestRedraw();
@@ -322,11 +320,8 @@ class RenderedTarget extends Target {
         // Keep direction between -179 and +180.
         this.direction = MathUtil.wrapClamp(direction, -179, 180);
         if (this.renderer) {
-            const renderedDirectionScale = this._getRenderedDirectionAndScale();
-            this.renderer.updateDrawableProperties(this.drawableID, {
-                direction: renderedDirectionScale.direction,
-                scale: renderedDirectionScale.scale
-            });
+            const {direction: renderedDirection, scale} = this._getRenderedDirectionAndScale();
+            this.renderer.updateDrawableDirectionScale(this.drawableID, renderedDirection, scale);
             if (this.visible) {
                 this.emit(RenderedTarget.EVENT_TARGET_VISUAL_CHANGE, this);
                 this.runtime.requestRedraw();
@@ -346,23 +341,6 @@ class RenderedTarget extends Target {
     }
 
     /**
-     * Set a say bubble.
-     * @param {?string} type Type of say bubble: "say", "think", or null.
-     * @param {?string} message Message to put in say bubble.
-     */
-    setSay (type, message) {
-        if (this.isStage) {
-            return;
-        }
-        // @todo: Render to stage.
-        if (!type || !message) {
-            log.info('Clearing say bubble');
-            return;
-        }
-        log.info('Setting say bubble:', type, message);
-    }
-
-    /**
      * Set visibility; i.e., whether it's shown or hidden.
      * @param {!boolean} visible True if should be shown.
      */
@@ -372,9 +350,7 @@ class RenderedTarget extends Target {
         }
         this.visible = !!visible;
         if (this.renderer) {
-            this.renderer.updateDrawableProperties(this.drawableID, {
-                visible: this.visible
-            });
+            this.renderer.updateDrawableVisible(this.drawableID, this.visible);
             if (this.visible) {
                 this.emit(RenderedTarget.EVENT_TARGET_VISUAL_CHANGE, this);
                 this.runtime.requestRedraw();
@@ -403,11 +379,8 @@ class RenderedTarget extends Target {
                 (1.5 * this.runtime.constructor.STAGE_HEIGHT) / origH
             );
             this.size = MathUtil.clamp(size / 100, minScale, maxScale) * 100;
-            const renderedDirectionScale = this._getRenderedDirectionAndScale();
-            this.renderer.updateDrawableProperties(this.drawableID, {
-                direction: renderedDirectionScale.direction,
-                scale: renderedDirectionScale.scale
-            });
+            const {direction, scale} = this._getRenderedDirectionAndScale();
+            this.renderer.updateDrawableDirectionScale(this.drawableID, direction, scale);
             if (this.visible) {
                 this.emit(RenderedTarget.EVENT_TARGET_VISUAL_CHANGE, this);
                 this.runtime.requestRedraw();
@@ -422,12 +395,10 @@ class RenderedTarget extends Target {
      * @param {!number} value Numerical magnitude of effect.
      */
     setEffect (effectName, value) {
-        if (!this.effects.hasOwnProperty(effectName)) return;
+        if (!Object.prototype.hasOwnProperty.call(this.effects, effectName)) return;
         this.effects[effectName] = value;
         if (this.renderer) {
-            const props = {};
-            props[effectName] = this.effects[effectName];
-            this.renderer.updateDrawableProperties(this.drawableID, props);
+            this.renderer.updateDrawableEffect(this.drawableID, effectName, value);
             if (this.visible) {
                 this.emit(RenderedTarget.EVENT_TARGET_VISUAL_CHANGE, this);
                 this.runtime.requestRedraw();
@@ -440,11 +411,14 @@ class RenderedTarget extends Target {
      */
     clearEffects () {
         for (const effectName in this.effects) {
-            if (!this.effects.hasOwnProperty(effectName)) continue;
+            if (!Object.prototype.hasOwnProperty.call(this.effects, effectName)) continue;
             this.effects[effectName] = 0;
         }
         if (this.renderer) {
-            this.renderer.updateDrawableProperties(this.drawableID, this.effects);
+            for (const effectName in this.effects) {
+                if (!Object.prototype.hasOwnProperty.call(this.effects, effectName)) continue;
+                this.renderer.updateDrawableEffect(this.drawableID, effectName, 0);
+            }
             if (this.visible) {
                 this.emit(RenderedTarget.EVENT_TARGET_VISUAL_CHANGE, this);
                 this.runtime.requestRedraw();
@@ -466,21 +440,8 @@ class RenderedTarget extends Target {
         );
         if (this.renderer) {
             const costume = this.getCostumes()[this.currentCostume];
-            const drawableProperties = {
-                skinId: costume.skinId,
-                costumeResolution: costume.bitmapResolution
-            };
-            if (
-                typeof costume.rotationCenterX !== 'undefined' &&
-                typeof costume.rotationCenterY !== 'undefined'
-            ) {
-                const scale = costume.bitmapResolution || 2;
-                drawableProperties.rotationCenter = [
-                    costume.rotationCenterX / scale,
-                    costume.rotationCenterY / scale
-                ];
-            }
-            this.renderer.updateDrawableProperties(this.drawableID, drawableProperties);
+            this.renderer.updateDrawableSkinId(this.drawableID, costume.skinId);
+
             if (this.visible) {
                 this.emit(RenderedTarget.EVENT_TARGET_VISUAL_CHANGE, this);
                 this.runtime.requestRedraw();
@@ -617,11 +578,8 @@ class RenderedTarget extends Target {
             this.rotationStyle = RenderedTarget.ROTATION_STYLE_LEFT_RIGHT;
         }
         if (this.renderer) {
-            const renderedDirectionScale = this._getRenderedDirectionAndScale();
-            this.renderer.updateDrawableProperties(this.drawableID, {
-                direction: renderedDirectionScale.direction,
-                scale: renderedDirectionScale.scale
-            });
+            const {direction, scale} = this._getRenderedDirectionAndScale();
+            this.renderer.updateDrawableDirectionScale(this.drawableID, direction, scale);
             if (this.visible) {
                 this.emit(RenderedTarget.EVENT_TARGET_VISUAL_CHANGE, this);
                 this.runtime.requestRedraw();
@@ -715,27 +673,19 @@ class RenderedTarget extends Target {
      */
     updateAllDrawableProperties () {
         if (this.renderer) {
-            const renderedDirectionScale = this._getRenderedDirectionAndScale();
+            const {direction, scale} = this._getRenderedDirectionAndScale();
+            this.renderer.updateDrawablePosition(this.drawableID, [this.x, this.y]);
+            this.renderer.updateDrawableDirectionScale(this.drawableID, direction, scale);
+            this.renderer.updateDrawableVisible(this.drawableID, this.visible);
+
             const costume = this.getCostumes()[this.currentCostume];
-            const bitmapResolution = costume.bitmapResolution || 2;
-            const props = {
-                position: [this.x, this.y],
-                direction: renderedDirectionScale.direction,
-                draggable: this.draggable,
-                scale: renderedDirectionScale.scale,
-                visible: this.visible,
-                skinId: costume.skinId,
-                costumeResolution: bitmapResolution,
-                rotationCenter: [
-                    costume.rotationCenterX / bitmapResolution,
-                    costume.rotationCenterY / bitmapResolution
-                ]
-            };
+            this.renderer.updateDrawableSkinId(this.drawableID, costume.skinId);
+
             for (const effectName in this.effects) {
-                if (!this.effects.hasOwnProperty(effectName)) continue;
-                props[effectName] = this.effects[effectName];
+                if (!Object.prototype.hasOwnProperty.call(this.effects, effectName)) continue;
+                this.renderer.updateDrawableEffect(this.drawableID, effectName, this.effects[effectName]);
             }
-            this.renderer.updateDrawableProperties(this.drawableID, props);
+
             if (this.visible) {
                 this.emit(RenderedTarget.EVENT_TARGET_VISUAL_CHANGE, this);
                 this.runtime.requestRedraw();
@@ -840,6 +790,7 @@ class RenderedTarget extends Target {
      * @return {boolean} True iff touching a clone of the sprite.
      */
     isTouchingSprite (spriteName) {
+        spriteName = Cast.toString(spriteName);
         const firstClone = this.runtime.getSpriteTargetByName(spriteName);
         if (!firstClone || !this.renderer) {
             return false;
@@ -1069,25 +1020,25 @@ class RenderedTarget extends Target {
      * @param {object} data An object with sprite info data to set.
      */
     postSpriteInfo (data) {
-        const force = data.hasOwnProperty('force') ? data.force : null;
-        const isXChanged = data.hasOwnProperty('x');
-        const isYChanged = data.hasOwnProperty('y');
+        const force = Object.prototype.hasOwnProperty.call(data, 'force') ? data.force : null;
+        const isXChanged = Object.prototype.hasOwnProperty.call(data, 'x');
+        const isYChanged = Object.prototype.hasOwnProperty.call(data, 'y');
         if (isXChanged || isYChanged) {
             this.setXY(isXChanged ? data.x : this.x, isYChanged ? data.y : this.y, force);
         }
-        if (data.hasOwnProperty('direction')) {
+        if (Object.prototype.hasOwnProperty.call(data, 'direction')) {
             this.setDirection(data.direction);
         }
-        if (data.hasOwnProperty('draggable')) {
+        if (Object.prototype.hasOwnProperty.call(data, 'draggable')) {
             this.setDraggable(data.draggable);
         }
-        if (data.hasOwnProperty('rotationStyle')) {
+        if (Object.prototype.hasOwnProperty.call(data, 'rotationStyle')) {
             this.setRotationStyle(data.rotationStyle);
         }
-        if (data.hasOwnProperty('visible')) {
+        if (Object.prototype.hasOwnProperty.call(data, 'visible')) {
             this.setVisible(data.visible);
         }
-        if (data.hasOwnProperty('size')) {
+        if (Object.prototype.hasOwnProperty.call(data, 'size')) {
             this.setSize(data.size);
         }
     }

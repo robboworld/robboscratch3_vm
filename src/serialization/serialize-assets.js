@@ -20,15 +20,19 @@ const serializeAssets = function (runtime, assetType, optTargetId) {
         const currAssets = currTarget.sprite[assetType];
         for (let j = 0; j < currAssets.length; j++) {
             const currAsset = currAssets[j];
-            const asset = currAsset.asset;
-            let fileAssetId = asset.assetId;
-            if (assetType === 'costumes' && asset && asset.data &&
-                !SB3_ASSET_ID_HEX.test(String(fileAssetId))) {
-                fileAssetId = md5(asset.data);
+            const asset = currAsset.broken ? currAsset.broken.asset : currAsset.asset;
+            if (asset) {
+                // Serialize asset if it exists, otherwise skip
+                let fileAssetId = asset.assetId;
+                if (assetType === 'costumes' && asset.data &&
+                    !SB3_ASSET_ID_HEX.test(String(fileAssetId))) {
+                    fileAssetId = md5(asset.data);
+                }
+                assetDescs.push({
+                    fileName: `${fileAssetId}.${asset.dataFormat}`,
+                    fileContent: asset.data
+                });
             }
-            assetDescs.push({
-                fileName: `${fileAssetId}.${asset.dataFormat}`,
-                fileContent: asset.data});
         }
     }
     return assetDescs;

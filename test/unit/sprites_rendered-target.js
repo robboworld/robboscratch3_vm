@@ -27,6 +27,24 @@ test('setxy', t => {
     t.end();
 });
 
+test('blocks get new id on duplicate', t => {
+    const r = new Runtime();
+    const s = new Sprite(null, r);
+    const rt = new RenderedTarget(s, r);
+    const block = {
+        id: 'id1',
+        topLevel: true,
+        fields: {}
+    };
+
+    rt.blocks.createBlock(block);
+
+    return rt.duplicate().then(duplicate => {
+        t.notOk(Object.prototype.hasOwnProperty.call(duplicate.blocks._blocks, block.id));
+        t.end();
+    });
+});
+
 test('direction', t => {
     const r = new Runtime();
     const s = new Sprite(null, r);
@@ -35,17 +53,6 @@ test('direction', t => {
     a.renderer = renderer;
     a.setDirection(123);
     t.equals(a._getRenderedDirectionAndScale().direction, 123);
-    t.end();
-});
-
-test('setSay', t => {
-    const r = new Runtime();
-    const s = new Sprite(null, r);
-    const a = new RenderedTarget(s, r);
-    const renderer = new FakeRenderer();
-    a.renderer = renderer;
-    a.setSay();
-    a.setSay('types not specified', 'message');
     t.end();
 });
 
