@@ -29,10 +29,6 @@ class Scratch3IoTBlocks{
             txt: -1,
             txt2: -1
         }
-        console.log(this.runtime.toString());
-        try{
-            console.log(this.runtime.ECA.toString());
-        } catch {}
        
     }
  
@@ -83,7 +79,6 @@ class Scratch3IoTBlocks{
     iot_broker_init(args){
         this.baddr = args.BADDR;
         this.bport = args.BPORT;
-        console.log("baddr = " + this.baddr + "; bport = " + this.bport);
         // client = mqtt.connect("mqtt://" + this.baddr + ":" + this.bport + "/");\
 
 
@@ -99,7 +94,6 @@ class Scratch3IoTBlocks{
 
         this.options.path = "/mqtt";
         
-        console.log("Trying to connect with this options:\n" + JSON.stringify(this.options));
 
         this.runtime.IOT.client = mqtt.connect(this.options);
 
@@ -156,11 +150,8 @@ class Scratch3IoTBlocks{
 
             let msg = args.MESSAGE.toString();
 
-            console.log(msg);
-            console.log(typeof(msg));
 
 
-            console.log("mess_to_topic.args" + args + "; <baddr, bport> = <" + topic + ", " + msg + ">");
 
 
             try {
@@ -181,18 +172,14 @@ class Scratch3IoTBlocks{
         if(this.runtime.IOT.client == undefined){
             console.error("this.runtime.IOT.client is undefined!!!");
         }else{
-            console.log("subscribe_to_topic.args" + args);
             let topic = this.prefix+args.TNAME;
             this.runtime.IOT.client.subscribe(topic, function(err){
                 if(err) console.error(err);
-                else console.log("Subscribed to " + topic);
             });
             this.runtime.IOT.client.on('message', (topic, message)=>{
-                console.log("From topic " + topic + ": " + message.toString());
                 // console.log(typeof(topic));
                 // console.log(typeof(message));
                 this.last_messages[topic] = message.toString();
-                console.log("this.last_messages." + topic + " = " + this.last_messages[topic]);
 
                 if (typeof(this.last_messages[this.prefix+args.TNAME]) !== 'undefined'){
        
@@ -222,17 +209,14 @@ class Scratch3IoTBlocks{
     }
     iot_receive_message(args){
         let topic = this.prefix+args.TNAME;
-        console.log(this.last_messages[topic]);
         return this.last_messages[topic]==undefined?"":this.last_messages[topic];
     }
     iot_set_logpass(args){
         this.options.username = args.UNAME;
         this.options.password = args.PASS;
-        console.log(args.UNAME + "; " + args.PASS);
     }
     iot_set_client_id(args){
         this.options.clientId = args.ID;
-        console.log(args.ID);
     }
     // iot_set_delay_for_topic(args){
     //     this.delays[args.TNAME] = args.DELAY;
@@ -245,19 +229,15 @@ class Scratch3IoTBlocks{
     iot_parse_data(args){
         let msg = this.last_messages[args.TNAME];
         if(msg == undefined || msg.split("#").length!=11) return;
-        console.log("msg: " + msg);
         let splited = msg.toString().split("#").reduce((i, a) => {
                 this.data_sensors[Object.keys(this.data_sensors)[i]] = Number(a);
                 return i+1;
             }, 0);
-        console.log("Parsed msg:" + this.data_sensors.toString());
     }
     iot_set_wifi(args){
         if(this.runtime.ECA != undefined){
             this.runtime.ECA.setWifi(args.SSID, args.PASS);
-            console.log("Setting SSID:" + args.SSID + "; PASS: " + args.PASS);
         } else {
-            console.log(this.runtime.toString());
             console.error("Esp disconnected");
         }
     }
@@ -266,34 +246,28 @@ class Scratch3IoTBlocks{
         this.delays[args.TNAME] = args.DELAY;
         let lim =+args.DELAY+1;
         let mess = "" + lim +'b'+this.topics_enum[args.TNAME];
-        console.log(mess);
         this.runtime.IOT.client.publish(this.prefix+"opt", mess);
         return;
     }
     iot_set_under_treshold(args){
-      console.log(args.TNAME);
       let lim=+args.TRESH
       if(lim>256*256-1)
       lim=256*256-1
       else
       lim=lim<<16
       let mess = "" + lim +'c'+this.topics_enum[args.TNAME];
-      console.log(mess);
       client.publish(this.prefix+"opt", mess);
       return;
     }
     iot_set_upper_treshold(args){
-      console.log(args.TNAME);
       let lim=+args.TRESH
       if(lim>256*256-1)
       lim=256*256-1
       let mess = "" + lim +'c'+this.topics_enum[args.TNAME];
-      console.log(mess);
       this.runtime.IOT.client.publish(this.prefix+"opt", mess);
       return;
     }
     iot_set_both_treshold(args){
-      console.log(args.TNAME);
       let lim=+args.TRESH
       if(lim>256*256-1)
       lim=256*256-1
@@ -302,12 +276,8 @@ class Scratch3IoTBlocks{
       let lim2=+args.TRESH2
       if(lim2>256*256-1)
       lim2=256*256-1
-      console.log(lim);
-      console.log(lim<<16);
-      console.log(lim2);
       lim=parseInt(lim) + parseInt(lim2);
       let mess = "" + (lim)+'c'+this.topics_enum[args.TNAME];
-      console.log(mess);
       this.runtime.IOT.client.publish(this.prefix+"opt", mess);
       return;
     }

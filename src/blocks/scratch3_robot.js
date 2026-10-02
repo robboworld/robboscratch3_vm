@@ -2,7 +2,6 @@ const Cast = require('../util/cast');
 const MathUtil = require('../util/math-util');
 const Timer = require('../util/timer');
 //const Robot_command = require('../robot/robot_command');
-const Renderer = require('scratch-render');
 const MOTORS_ON_DELTA = 50;
 const DEGREE_RATIO = 5.19;
 const {
@@ -793,7 +792,6 @@ robot_first_draw(util){
           return sensor_data;
           break;
           default:
-          console.log("WTF");
           return -1;
         }
   }
