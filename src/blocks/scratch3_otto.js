@@ -450,7 +450,6 @@ class Scratch3RobotBlocks {
         this.runtime.OCA
     }
     robot_motors_off(args, util){
-      console.log(`Robot stop!`);
       clearInterval(this.motors_on_interval);
       clearInterval(this.motors_off_interval);
       this.need_to_stop = true;
