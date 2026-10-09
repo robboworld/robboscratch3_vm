@@ -194,3 +194,19 @@ test('session: power off is refused in the air', t => {
         t.end();
     });
 });
+
+test('session: a failed config write is tried once more', t => {
+    const {session} = makeConnectedSession();
+    session.telemetryStore.getValue = () => 0;
+    let calls = 0;
+    session._writeRadioConfigOnce = () => {
+        calls += 1;
+        if (calls === 1) return Promise.reject(new Error('Crazyflie control response did not arrive'));
+        return Promise.resolve(true);
+    };
+    return session.writeRadioConfig({channel: 92, address: new Uint8Array(5)}).then(ok => {
+        t.equal(ok, true);
+        t.equal(calls, 2);
+        t.end();
+    });
+});
