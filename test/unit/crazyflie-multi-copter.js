@@ -276,6 +276,25 @@ test('QCA: scan finds the copters of the group', t => {
     });
 });
 
+test('QCA: one lost ACK does not hide a copter from the scan', t => {
+    const {qca, adapter} = loadQcaWithFakeRadio(new Set(['E7E7E7E702']));
+    const answers = adapter.sendAndReceive;
+    let firstProbe = true;
+    adapter.sendAndReceive = (...args) => {
+        const address = adapter.log.filter(e => e.startsWith('address:')).pop()
+            .slice(8);
+        if (address === 'E7E7E7E702' && firstProbe) {
+            firstProbe = false;
+            return Promise.resolve({state: false, data: new Uint8Array(0)});
+        }
+        return answers(...args);
+    };
+    return qca._scanCopters().then(found => {
+        t.same(found, [2], 'found on the second probe');
+        t.end();
+    });
+});
+
 test('QCA: copter list, free numbers and the use-on-this-computer switch', t => {
     const {qca} = loadQcaWithFakeRadio(new Set());
     qca._lastScanIds = new Set([1, 'new']);
