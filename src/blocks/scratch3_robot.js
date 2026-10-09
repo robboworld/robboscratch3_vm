@@ -763,8 +763,9 @@ robot_first_draw(util){
           var p=[];
           p[0]=ray.startPoint[0]; p[1]=ray.startPoint[1]; p[2]=0;
           var l= this.sampleStageColor(util, p);
-          sensor_data = Math.round(l[0] + l[1] + l[2]) / 3;
-          var lineOut = Math.round(sensor_data / 2.55);
+          // Declared here: an undeclared name throws ReferenceError in strict-mode bundles.
+          var lineBrightness = Math.round(l[0] + l[1] + l[2]) / 3;
+          var lineOut = Math.round(lineBrightness / 2.55);
             return lineOut;
             break;
             case 2: // led
@@ -788,8 +789,8 @@ robot_first_draw(util){
           case 3: // light
           var p=[];p[0]=util.target.x; p[1]=util.target.y; p[2]=0;
           var l= this.sampleStageColor(util, p);
-          sensor_data=255 - Math.round(l[0]+l[1]+l[2])/3;
-          return sensor_data;
+          var lightLevel = 255 - Math.round(l[0]+l[1]+l[2])/3;
+          return lightLevel;
           break;
           default:
           return -1;
