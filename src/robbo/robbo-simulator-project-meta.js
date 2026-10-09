@@ -50,6 +50,29 @@ const normalizeSavedSlot = raw => {
 };
 
 /**
+ * Poses of simulator copters 2..15: `{number, x, y, z, yaw}`; invalid entries are dropped.
+ * @param {*} raw value from options or project JSON
+ * @returns {Array<object>} normalized list
+ */
+const normalizeCopterSimStates = raw => {
+    if (!Array.isArray(raw)) return [];
+    const out = [];
+    raw.forEach(item => {
+        if (!item || typeof item !== 'object') return;
+        const number = Number(item.number);
+        const pose = ['x', 'y', 'z', 'yaw'].map(k => Number(item[k]));
+        if (!Number.isInteger(number) || number < 2 || number > 15 || !pose.every(Number.isFinite)) return;
+        const state = {number, x: pose[0], y: pose[1], z: pose[2], yaw: pose[3]};
+        ['battery', 'originX', 'originY'].forEach(key => {
+            const value = Number(item[key]);
+            if (item[key] !== undefined && Number.isFinite(value)) state[key] = value;
+        });
+        out.push(state);
+    });
+    return out;
+};
+
+/**
  * Build v1 meta block for project.json from GUI/runtime snapshot.
  * @param {object} opts
  * @param {boolean} opts.simEnabled
@@ -103,6 +126,13 @@ const buildRobboSimulatorMetaForSave = opts => {
             z: cs.z,
             yaw: cs.yaw
         };
+        ['battery', 'originX', 'originY'].forEach(key => {
+            if (Number.isFinite(cs[key])) out.copterSimState[key] = cs[key];
+        });
+    }
+    const states = normalizeCopterSimStates(opts.copterSimStates);
+    if (states.length > 0) {
+        out.copterSimStates = states;
     }
     return out;
 };
@@ -166,15 +196,21 @@ const parseRobboSimulatorMeta = raw => {
         const yaw = Number(rawCs.yaw);
         if (Number.isFinite(x) && Number.isFinite(y) && Number.isFinite(z) && Number.isFinite(yaw)) {
             copterSimState = {x, y, z, yaw};
+            ['battery', 'originX', 'originY'].forEach(key => {
+                const value = Number(rawCs[key]);
+                if (rawCs[key] !== undefined && Number.isFinite(value)) copterSimState[key] = value;
+            });
         }
     }
+    const copterSimStates = normalizeCopterSimStates(raw.copterSimStates);
     return {
         version: META_VERSION,
         simEnabled,
         extensionPackActivated,
         copterSimEnabled,
         sensors,
-        copterSimState
+        copterSimState,
+        copterSimStates
     };
 };
 

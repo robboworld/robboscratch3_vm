@@ -34,6 +34,7 @@ const {OttoControlAPI} =  require ('Robboscratch3_DeviceControlAPI');
 const {ArduinoControlAPI} =  require ('Robboscratch3_DeviceControlAPI');
 const {EspControlAPI} =  require ('Robboscratch3_DeviceControlAPI');
 const StateIOTBlock = require('./iot');
+const {listSimCopterNumbers} = require('./util/copter-sim-sprite');
 
 const RESERVED_NAMES = ['_mouse_', '_stage_', '_edge_', '_myself_', '_random_'];
 
@@ -470,9 +471,7 @@ class VirtualMachine extends EventEmitter {
 
     _hasSimulationCopterSprite () {
         if (!this.runtime || !this.runtime.targets) return false;
-        return this.runtime.targets.some(t =>
-            t.isOriginal && !t.isStage && t.sprite && t.sprite.name === 'Robbo Quadcopter'
-        );
+        return listSimCopterNumbers(this.runtime.targets).length > 0;
     }
 
     /**
@@ -512,6 +511,10 @@ class VirtualMachine extends EventEmitter {
         if (!this.runtime.sim_copter_ac || !b) {
             return null;
         }
+        return this._copterSimPose(b);
+    }
+
+    _copterSimPose (b) {
         const round = (v, n) => {
             const p = 10 ** n;
             return Math.round(v * p) / p;
@@ -520,15 +523,42 @@ class VirtualMachine extends EventEmitter {
             x: round(b.sim_x, 4),
             y: round(b.sim_y, 4),
             z: round(b.sim_z, 4),
-            yaw: round(b._castYawTo360(b.sim_yaw), 2)
+            yaw: round(b._castYawTo360(b.sim_yaw), 2),
+            battery: round(b.sim_battery, 1),
+            originX: round(b.sim_origin_x, 4),
+            originY: round(b.sim_origin_y, 4)
         };
     }
 
-    _applyCopterSimulatorPersistState (state) {
+    /**
+     * Poses of simulator copters 2..15 (copter 1 is {@link getCopterSimulatorPersistState}).
+     * @returns {Array<object>} `{number, x, y, z, yaw}` per copter
+     */
+    getCopterSimulatorPersistStates () {
+        const blocks = this.runtime._copterBlocks;
+        if (!this.runtime.sim_copter_ac || !blocks) {
+            return [];
+        }
+        return blocks.getSimControllers()
+            .filter(c => c.simNumber !== 1)
+            .map(c => Object.assign({number: c.simNumber}, this._copterSimPose(c)));
+    }
+
+    _applyCopterSimulatorPersistStates (states) {
+        const blocks = this.runtime._copterBlocks;
+        if (!Array.isArray(states) || !blocks) return;
+        states.forEach(state => {
+            if (state && Number.isInteger(state.number) && state.number !== 1) {
+                this._applyCopterSimulatorPersistState(state, blocks.getController(state.number));
+            }
+        });
+    }
+
+    _applyCopterSimulatorPersistState (state, controller) {
         if (!state || typeof state !== 'object') {
             return;
         }
-        const b = this.runtime._copterSimBlocks;
+        const b = controller || this.runtime._copterSimBlocks;
         if (!b || !this.runtime.sim_copter_ac) {
             return;
         }
@@ -536,6 +566,9 @@ class VirtualMachine extends EventEmitter {
         if (Number.isFinite(state.y)) b.sim_y = state.y;
         if (Number.isFinite(state.z)) b.sim_z = Math.max(0, state.z);
         if (Number.isFinite(state.yaw)) b.sim_yaw = b._castYawTo360(state.yaw);
+        if (Number.isFinite(state.battery)) b.simChargeTo(state.battery);
+        if (Number.isFinite(state.originX)) b.sim_origin_x = state.originX;
+        if (Number.isFinite(state.originY)) b.sim_origin_y = state.originY;
         b.fack = 0;
         b._simClearInterval();
         b._simClearAllTimeouts();
@@ -551,6 +584,7 @@ class VirtualMachine extends EventEmitter {
         const obj = sb3.serialize(this.runtime);
         let metaBlock = null;
         const copterSimState = this.getCopterSimulatorPersistState();
+        const copterSimStates = this.getCopterSimulatorPersistStates();
         const getter = this._robboSimulatorSaveContextGetter;
         if (getter) {
             try {
@@ -561,7 +595,8 @@ class VirtualMachine extends EventEmitter {
                         extensionPackActivated: !!ctx.extensionPackActivated,
                         copterSimEnabled: ctx.copterSimEnabled !== undefined ? !!ctx.copterSimEnabled : !!this.runtime.sim_copter_ac,
                         sensors: ctx.sensors,
-                        copterSimState: copterSimState || undefined
+                        copterSimState: copterSimState || undefined,
+                        copterSimStates: copterSimStates
                     });
                 }
             } catch (e) {
@@ -574,7 +609,8 @@ class VirtualMachine extends EventEmitter {
                 extensionPackActivated: false,
                 copterSimEnabled: !!this.runtime.sim_copter_ac,
                 sensors: [],
-                copterSimState: copterSimState || undefined
+                copterSimState: copterSimState || undefined,
+                copterSimStates: copterSimStates
             });
         }
         robboSimulatorProjectMeta.mergeRobboSimulatorMetaIntoProjectJson(obj, metaBlock);
@@ -610,6 +646,7 @@ class VirtualMachine extends EventEmitter {
             }
             if (resolvedCopterSimEnabled) {
                 this._applyCopterSimulatorPersistState(parsed.copterSimState);
+                this._applyCopterSimulatorPersistStates(parsed.copterSimStates);
             }
             this.emit(VirtualMachine.ROBBO_SIMULATOR_PROJECT_META_APPLIED, {
                 simEnabled: resolvedSimEnabled,
