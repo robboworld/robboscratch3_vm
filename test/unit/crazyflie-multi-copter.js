@@ -310,29 +310,62 @@ test('QCA: a connected factory copter gets the first free number automatically',
     factory.isConnected = () => true;
     factory.isAirborne = () => false;
     const calls = [];
+    const factoryAddress = new Uint8Array([0xe7, 0xe7, 0xe7, 0xe7, 0xe7]);
+    factory.readEepromConfig = () => Promise.resolve({channel: 80, address: factoryAddress});
     qca.assignCopterNumber = (from, number) => {
         calls.push([from, number]);
         return Promise.resolve(true);
     };
-    qca._maybeAutoNumber();
-    t.equal(calls.length, 0, 'not without a search started by the user');
     qca._autoNumberArmed = true;
     qca._maybeAutoNumber();
-    t.equal(qca.getCopters().find(c => c.id === 'new').numbering, true, 'palette sees the assignment');
-    qca._maybeAutoNumber();
-    return Promise.resolve().then(() => null).then(() => {
-        t.same(calls, [['new', 2]], 'one assignment, first free number');
-        t.equal(qca._autoNumbering, false);
-        t.same(qca._lastAutoNumber.number, 2);
-
+    t.equal(calls.length, 0, 'not before its config memory was read');
+    qca._autoNumberArmed = false;
+    return qca._identifyFactoryCopter().then(() => {
+        qca._maybeAutoNumber();
+        t.equal(calls.length, 0, 'not without a search started by the user');
         qca._autoNumberArmed = true;
-        qca._autoNumberFailed = true;
         qca._maybeAutoNumber();
-        t.equal(calls.length, 1, 'no retry after a failure until the next search');
-        qca._autoNumberFailed = false;
-        factory.isAirborne = () => true;
+        t.equal(qca.getCopters().find(c => c.id === 'new').numbering, true, 'palette sees the assignment');
         qca._maybeAutoNumber();
-        t.equal(calls.length, 1, 'not while flying');
+        return null;
+    })
+        .then(() => null)
+        .then(() => {
+            t.same(calls, [['new', 2]], 'one assignment, first free number');
+            t.equal(qca._autoNumbering, false);
+            t.same(qca._lastAutoNumber.number, 2);
+
+            qca._autoNumberArmed = true;
+            qca._autoNumberFailed = true;
+            qca._maybeAutoNumber();
+            t.equal(calls.length, 1, 'no retry after a failure until the next search');
+            qca._autoNumberFailed = false;
+            factory.isAirborne = () => true;
+            qca._maybeAutoNumber();
+            t.equal(calls.length, 1, 'not while flying');
+            t.end();
+        });
+});
+
+test('QCA: a numbered copter answering on the factory address is not numbered again', t => {
+    // 09.10.2026: copter 1 answered as a factory copter for ~30 s after a crash.
+    const {qca} = loadQcaWithFakeRadio(new Set());
+    qca._lastScanIds = new Set(['new']);
+    const factory = qca.sessions.get('new');
+    factory.isConnected = () => true;
+    factory.isAirborne = () => false;
+    const ownAddress = qca.copter(1).crazyflieSession.link.config.address;
+    factory.readEepromConfig = () => Promise.resolve({channel: 80, address: ownAddress});
+    const calls = [];
+    qca.assignCopterNumber = (from, number) => {
+        calls.push([from, number]);
+        return Promise.resolve(true);
+    };
+    qca._autoNumberArmed = true;
+    return qca._identifyFactoryCopter().then(() => {
+        qca._maybeAutoNumber();
+        t.equal(calls.length, 0, 'no second number');
+        t.equal(qca.getCopters().find(c => c.id === 'new').numberedAs, 1, 'the palette knows who it is');
         t.end();
     });
 });

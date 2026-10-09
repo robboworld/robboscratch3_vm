@@ -152,7 +152,7 @@ test('HL packet without ACK: retried, priority not relaxed, stream kept', t => {
         .then(ok => {
             t.equal(ok, false, 'land not delivered');
             const lands = link.sent.filter(p => isHl(p, protocol.HL_COMMAND_LAND_2));
-            t.equal(lands.length, 5, 'land retried');
+            t.ok(lands.length >= 5, `land retried (${lands.length} times within ~1 s)`);
             const firstLand = link.sent.findIndex(p => isHl(p, protocol.HL_COMMAND_LAND_2));
             t.notOk(link.sent.slice(firstLand).some(isNotify), 'no notify without the land');
             t.ok(session.velocityCommandLoop, 'hover stream resumed');
@@ -238,6 +238,71 @@ test('closed link while connected is a loss', t => {
         session._clearPollingLoop();
         t.equal(session.status.state, 'lost');
         t.equal(session.status.lostReason, 'linkClosed');
+        t.end();
+    });
+});
+
+test('journal: commands, deliveries and failures are recorded', t => {
+    const {session} = makeFlyingSession(p => !isHl(p, protocol.HL_COMMAND_LAND_2));
+    return session.goToHighLevel(0.25, 0, 0, 0, 0.5, {relative: true, forceLegacy: true})
+        .then(() => session.landAndClose())
+        .then(() => {
+            const events = session.getFlightJournal().map(e => (e.command ? `${e.event}:${e.command}` : e.event));
+            t.ok(events.indexOf('goTo') !== -1, 'go_to asked');
+            t.ok(events.indexOf('delivered:goTo') !== -1, 'go_to delivered');
+            t.ok(events.indexOf('notDelivered:land') !== -1, 'land not delivered');
+            const failed = session.getFlightJournal().find(e => e.event === 'notDelivered');
+            t.ok(failed.attempts >= 5 && failed.ms >= 1000, `${failed.attempts} attempts over ${failed.ms} ms`);
+            return settle(session);
+        });
+});
+
+test('radio answers but the log stopped: lost at once (telemetryStale)', t => {
+    const {session, link} = makeFlyingSession();
+    const now = Date.now();
+    session.telemetryStore.lastPacketAt = now - 1600;
+    session._lastAckOkAt = now - 100;
+    t.equal(session._telemetryLossReason(now), 'telemetryStale');
+    session._lastAckOkAt = now - 2000;
+    t.equal(session._telemetryLossReason(now), null, 'no answers either: wait for the usual timeout');
+    session.telemetryStore.lastPacketAt = now - 1000;
+    session._lastAckOkAt = now - 100;
+    t.equal(session._telemetryLossReason(now), null, 'a short gap is normal');
+    session.telemetryStore.lastPacketAt = now - 1600;
+    link.quality = 50;
+    t.equal(session._telemetryLossReason(now), null, 'weak link: log packets just get lost, not a hang');
+    t.end();
+});
+
+test('a stall of the shared dongle does not make the copters lost', t => {
+    const {session, link} = makeFlyingSession();
+    const now = Date.now();
+    link.scheduler = {stalledForMs: () => 3000, lastStallEndAt: 0};
+    session.telemetryStore.lastPacketAt = now - 4000;
+    t.equal(session._telemetryLossReason(now), null, 'during the stall');
+    link.scheduler = {stalledForMs: () => 0, lastStallEndAt: now - 200};
+    t.equal(session._telemetryLossReason(now), null, 'right after it: silence counts from its end');
+    t.ok(session.getFlightJournal().some(e => e.event === 'radioStall'), 'journal notes the stall');
+    t.end();
+});
+
+test('lost in the air with the land delivered: shown as landing, flying only briefly', t => {
+    const {session} = makeFlyingSession();
+    session._handleLinkLost('telemetryTimeout');
+    return wait(60).then(() => {
+        t.ok(session.isLostInAirLanding(), 'landing, not hovering');
+        t.ok(session._airborneAtLossUntil - Date.now() < 10000, 'not 90 s of «flying»');
+        return settle(session);
+    });
+});
+
+test('estimator reset before takeoff makes the start point the origin again', t => {
+    const link = makeFakeLink();
+    const session = new CrazyflieSession({link});
+    session.telemetryStore.baselinePending = false;
+    session.telemetryStore.baseline = {x: -0.69, y: 0.36};
+    return session._resetEstimatorBeforeTakeoff(null).then(() => {
+        t.same(session.telemetryStore.baseline, {x: 0, y: 0});
         t.end();
     });
 });
