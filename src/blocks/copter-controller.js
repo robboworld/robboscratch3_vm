@@ -2,6 +2,7 @@ const Cast = require('../util/cast');
 const MathUtil = require('../util/math-util');
 const Timer = require('../util/timer');
 const QuadcopterCommandCoordinator = require('./quadcopter-command-coordinator');
+const Thread = require('../engine/thread');
 const formatMessage = require('format-message');
 const {
     COPTER_DIR_MSG,
@@ -63,8 +64,9 @@ const SIM_POS_TOLERANCE = 0.004;
 const SIM_YAW_TOLERANCE = 2.5;
 
 /**
- * Полёт по железу: velocity setpoints — в **системе координат корпуса** (cflib send_hover_setpoint).
- * HL go_to(relative) — смещение в body frame. Полёт в точку по координатам — velocity, yaw rate 0.
+ * Полёт по железу: каждый блок — одна HL-команда (takeoff / go_to relative / land). Траекторию
+ * ведёт планировщик на борту и потом сам держит точку: поток уставок не нужен, потеря связи
+ * моторы не отключает. Смещение relative go_to — в **мировой** системе, поворот — смещение yaw.
  */
 const HARDWARE_YAW_RATE_DPS = 72;
 const HARDWARE_MAX_YAW_RATE_DPS = 144;
@@ -73,16 +75,10 @@ const HARDWARE_TARGET_COMMAND_TIMEOUT_MS = 45000;
 const HARDWARE_LONG_TARGET_COMMAND_TIMEOUT_MS = 120000;
 /** HL go_to / distance: finish early when within this 3D error (m). */
 const HARDWARE_POS_TOL_M = 0.07;
+/** HL rotation: finish early when the heading is within this error (degrees). */
+const HARDWARE_YAW_TOL_DEG = 5;
 /** Upper bound on block wait beyond nominal HL trajectory (radio + planner). */
 const HARDWARE_HL_EXTRA_WAIT_MS = 650;
-/** VM target commands that enqueue firmware HL trajectories (takeoff / land / go_to). */
-const HL_TARGET_COMMAND_KEYS = new Set([
-    'copter_fly_up',
-    'copter_land',
-    'copter_fly_distance',
-    'copter_fly_to_coords',
-    'copter_move_axis_to'
-]);
 /** Blocks that still run with a critical battery: they bring the copter down. */
 const BATTERY_EXEMPT_COMMAND_KEYS = new Set(['copter_land']);
 /** Altitude above which hover-hold is safe on project stop (matches {@link copter_is_flying}). */
@@ -158,16 +154,13 @@ class CopterController {
         this.CopterLANDING = null;
         this._simTimeouts = new Set();
         this.commandCoordinator = new QuadcopterCommandCoordinator({
-            onFlightCleanup: (reason, command) => {
+            isThreadAlive: thread => thread.status !== Thread.STATUS_DONE &&
+                (!this.runtime.threads || this.runtime.threads.indexOf(thread) !== -1),
+            onFlightCleanup: () => {
                 if (!this.runtime || !this.QCA) return;
-                const key = command && command.key;
-                if (key && HL_TARGET_COMMAND_KEYS.has(key) &&
-                    typeof this.QCA.abortHlTrajectories === 'function') {
-                    this.QCA.abortHlTrajectories(reason);
-                    return;
-                }
-                if (typeof this.QCA.softStopStreaming === 'function') {
-                    this.QCA.softStopStreaming(reason);
+                // Stop where it is: the planner holds the copter (HL STOP would cut the motors).
+                if (typeof this.QCA.holdPosition === 'function') {
+                    this.QCA.holdPosition();
                 } else if (typeof this.QCA.hoverStop === 'function') {
                     this.QCA.hoverStop();
                 }
@@ -316,21 +309,6 @@ class CopterController {
 
     _yawRateDps() {
         return BASE_YAW_RATE_DPS * this._speedMps() / DEFAULT_SPEED_MPS;
-    }
-
-    /** Hover setpoints jump to the target height at the firmware's pace; ramp it at block speed. */
-    _startHeightRamp(startZ) {
-        return { rampZ: Number(startZ) || 0, rampAt: Date.now() };
-    }
-
-    _stepHeightRamp(context, targetZ) {
-        const now = Date.now();
-        const dt = Math.max(0, (now - context.rampAt) / 1000);
-        context.rampAt = now;
-        const step = this._hardwareSpeedMps() * dt;
-        const delta = targetZ - context.rampZ;
-        context.rampZ = Math.abs(delta) <= step ? targetZ : context.rampZ + Math.sign(delta) * step;
-        return context.rampZ;
     }
 
     /** Hardware speed: block speed clamped to a safe indoor range. */
@@ -653,22 +631,6 @@ class CopterController {
         return yaw;
     }
 
-    /**
-     * HL takeoff/land/go_to holds the flight gate; velocity blocks must yield until it is released.
-     * @param {object} util
-     * @returns {boolean} true when streaming commands may start
-     */
-    _yieldUntilVelocityStreamingReady(util) {
-        if (!this.QCA || typeof this.QCA.canAcceptVelocityStreaming !== 'function') {
-            return true;
-        }
-        if (this.QCA.canAcceptVelocityStreaming()) {
-            return true;
-        }
-        util.yield();
-        return false;
-    }
-
     _shortestYawDeltaDeg(fromDeg, toDeg) {
         const from = Number(fromDeg);
         const to = Number(toDeg);
@@ -677,16 +639,6 @@ class CopterController {
         if (d > 180) d -= 360;
         if (d < -180) d += 360;
         return d;
-    }
-
-    /** Body-relative direction (deg) → velocity for legacy hover/velocity setpoints (m/s). */
-    _hardwareBodyVelocity(speed, dirDeg) {
-        const rad = Number(dirDeg) * Math.PI / 180;
-        const s = Number(speed);
-        return {
-            vx: s * Math.cos(rad),
-            vy: s * Math.sin(rad)
-        };
     }
 
     /** Body-relative direction (m) → offset for HL go_to(relative). */
@@ -711,14 +663,10 @@ class CopterController {
     }
 
     /**
-     * Critical battery: flight blocks do not start (in the air the DCA battery watchdog is already
-     * landing the copter); land and stop stay available.
+     * Critical battery, or on the ground with too little charge for a flight: a script still running
+     * after a low-battery landing must not lift the copter again. Land stays available.
      * @param {string} commandKey block opcode
      * @returns {boolean} true when the command must be skipped
-     */
-    /**
-     * Critical battery, or on the ground with too little charge for a flight: a script still running
-     * after a low-battery landing must not lift the copter again.
      */
     _refuseForCriticalBattery(commandKey) {
         if (BATTERY_EXEMPT_COMMAND_KEYS.has(commandKey)) return false;
@@ -740,13 +688,35 @@ class CopterController {
         }
     }
 
+    /**
+     * The battery is checked when a block starts. A block already running when the battery turns
+     * critical is dropped: the DCA is landing the copter, and the block must not fly it on.
+     * @param {string} commandKey block opcode
+     * @param {object} util block util of the calling script
+     * @returns {boolean} true when the block must not continue
+     */
+    _stopForBattery(commandKey, util) {
+        if (!this.commandCoordinator.isRunning(commandKey, util)) {
+            return this._refuseForCriticalBattery(commandKey);
+        }
+        if (BATTERY_EXEMPT_COMMAND_KEYS.has(commandKey)) return false;
+        const state = this.QCA && typeof this.QCA.getBatteryState === 'function' ?
+            this.QCA.getBatteryState() : null;
+        if (state && state.level === 'critical') {
+            this.commandCoordinator.cancel('battery');
+            return true;
+        }
+        return false;
+    }
+
     _runHardwareTargetCommand(commandKey, util, opts) {
-        if (this._refuseForCriticalBattery(commandKey)) return;
+        if (this._stopForBattery(commandKey, util)) return;
         const ceiling = opts.timeoutMs !== undefined
             ? opts.timeoutMs
             : HARDWARE_TARGET_COMMAND_TIMEOUT_MS;
         this.commandCoordinator.runTargetCommand(commandKey, util, {
             timeoutMs: ceiling,
+            preempt: opts.preempt === true,
             start: () => {
                 let preparedContext = {};
                 if (typeof opts.prepare === 'function') {
@@ -809,7 +779,7 @@ class CopterController {
     }
 
     _runHardwareTimedCommand(commandKey, util, opts) {
-        if (this._refuseForCriticalBattery(commandKey)) return;
+        if (this._stopForBattery(commandKey, util)) return;
         const softCeiling = (opts.durationMs || 0) + 15000;
         const timeoutMs = opts.timeoutMs !== undefined ? opts.timeoutMs : softCeiling;
         this.commandCoordinator.runTimedCommand(commandKey, util, {
@@ -896,29 +866,23 @@ class CopterController {
             intervalMs: 200,
             prepare: () => {
                 this.init_start_coordinates();
-                this.z = TAKEOFF_HEIGHT_M;
-                return { hlScheduled: false };
+                const climb = Math.max(0.05, TAKEOFF_HEIGHT_M - this.z);
+                this.QCA.takeoff(TAKEOFF_HEIGHT_M, climb / this._hardwareSpeedMps());
+                return {sentAt: Date.now()};
             },
-            dispatch: (context) => {
-                if (context.hlScheduled) {
-                    return;
-                }
-                context.hlScheduled = true;
-                const climb = Math.max(0.05, this.z - Number(this.QCA.get_coord('Z')));
-                this.QCA.takeoff(this.z, climb / this._hardwareSpeedMps());
+            dispatch: () => {
+                // HL takeoff sent in prepare.
             },
-            isDone: () => {
+            isDone: context => {
                 if (!this.QCA.isQuadcopterConnected()) {
                     return true;
                 }
-                if (typeof this.QCA.isHlTrajectoryIdle === 'function' &&
-                    !this.QCA.isHlTrajectoryIdle()) {
+                // The DCA holds the flight gate until the takeoff reached its height (or gave up);
+                // right after sending the takeoff it may not have taken the gate yet.
+                if (Date.now() - context.sentAt < 300) {
                     return false;
                 }
-                const nowZ = Number(this.QCA.get_coord("Z"));
-                // HL takeoff may use a higher absolute target than `this.z` when telemetry Z is stale
-                // (see QCA.takeoff); finish once we've reached at least the block's nominal height.
-                return Number.isFinite(nowZ) && nowZ >= this.z - this.delta;
+                return typeof this.QCA.isHlTrajectoryIdle !== 'function' || this.QCA.isHlTrajectoryIdle();
             },
             finish: () => {
                 this.init_start_coordinates();
@@ -976,6 +940,8 @@ class CopterController {
             timeoutMs: HARDWARE_LONG_TARGET_COMMAND_TIMEOUT_MS,
             intervalMs: 200,
             intervalSlot: 'landing',
+            // «Land» from another script interrupts the running move (e.g. a key while a loop flies).
+            preempt: true,
             prepare: () => {
                 this.init_start_coordinates();
                 const landOpts = { velocityMps: this._hardwareSpeedMps() };
@@ -984,21 +950,20 @@ class CopterController {
                     : 4000;
                 this.QCA.landAndClose(landOpts);
                 return {
-                    hlScheduled: true,
-                    landBlockDeadlineMs: Date.now() + estimateMs
+                    startedAt: Date.now(),
+                    landBlockDeadlineMs: Date.now() + estimateMs + 2000
                 };
             },
             dispatch: () => {
                 // HL land dispatched in prepare — avoid 200ms gap before handoff.
             },
-            isDone: (context, elapsedMs) => {
+            isDone: context => {
                 if (!this.QCA.isQuadcopterConnected()) {
                     return true;
                 }
-                if (typeof context.landBlockDeadlineMs === 'number') {
-                    return Date.now() >= context.landBlockDeadlineMs;
-                }
-                return elapsedMs >= 4000;
+                // Done when the copter is down; the deadline only bounds a lost or stuck landing.
+                const down = Date.now() - context.startedAt >= 500 && !this.copter_is_flying();
+                return down || Date.now() >= context.landBlockDeadlineMs;
             },
             finish: () => {
                 this.init_start_coordinates();
@@ -1050,7 +1015,7 @@ class CopterController {
     }
 
     _copterFlyDistanceVertical(dirKey, meters, util) {
-        const dz = dirKey === 'up' ? Number(meters) : -Number(meters);
+        const dz = dirKey === 'up' ? Cast.toNumber(meters) : -Cast.toNumber(meters);
         if (this.runtime.sim_copter_ac) {
             if (!this._ensureSimCopterSprite(util)) return;
             if (this.fack === 0) {
@@ -1079,40 +1044,12 @@ class CopterController {
             return;
         }
 
-        if (Math.abs(dz) < 1e-6) {
-            return this._runHardwareTimedCommand('copter_fly_distance', util, {
-                durationMs: 1,
-                start: () => { },
-                finish: () => this.init_start_coordinates()
-            });
-        }
-
-        if (Number(this.QCA.get_coord('Z')) + dz <= GROUND_TARGET_Z_M) {
-            return this.copter_land({}, util);
-        }
-        return this._runHardwareTargetCommand('copter_fly_distance', util, {
-            prepare: () => {
-                this.init_start_coordinates();
-                const startZ = this.z;
-                this.z = Math.max(0, this.z + dz);
-                return this._startHeightRamp(startZ);
-            },
-            dispatch: context => {
-                this.QCA.move_with_speed(0, 0, 0, this._stepHeightRamp(context, this.z));
-            },
-            isDone: () => {
-                this.nowz = Number(this.QCA.get_coord('Z'));
-                return Math.abs(this.nowz - this.z) < this.delta;
-            },
-            finish: () => {
-                this.QCA.hoverStop();
-                this.init_start_coordinates();
-            }
-        });
+        // --- Hardware path: HL relative go_to; down to the floor is a landing (decided at the start). ---
+        return this._runHardwareHlMove('copter_fly_distance', util, () => ({dx: 0, dy: 0, dz: dz}));
     }
 
     _copterFlyTimeVertical(dirKey, seconds, util) {
-        const durationMs = Math.max(0, Number(seconds)) * 1000;
+        const durationMs = Math.max(0, Cast.toNumber(seconds)) * 1000;
         if (durationMs <= 0) {
             return;
         }
@@ -1149,19 +1086,13 @@ class CopterController {
             return;
         }
 
-        return this._runHardwareTimedCommand('copter_fly_time', util, {
-            durationMs,
-            start: () => {
-                this.init_start_coordinates();
-                this.z = Number(this.QCA.get_coord('Z')) + sign * this._hardwareSpeedMps() * Number(seconds);
-                if (this.z < 0) this.z = 0;
-                this.QCA.move_with_speed(0, 0, 0, this.z);
-            },
-            finish: () => {
-                this.QCA.hoverStop();
-                this.init_start_coordinates();
-            }
-        });
+        // --- Hardware path: HL relative go_to over the block time. ---
+        return this._runHardwareHlMove('copter_fly_time', util, () => ({
+            dx: 0,
+            dy: 0,
+            dz: sign * this._hardwareSpeedMps() * durationMs / 1000,
+            durationS: durationMs / 1000
+        }));
     }
 
     copter_fly_distance(args, util) {
@@ -1209,58 +1140,22 @@ class CopterController {
             return;
         }
 
-        // --- Hardware path: HL go_to (cflib HighLevelCommander, COMMAND_GO_TO_2) ---
-        const meters = Number(args.METERS);
-        if (Math.abs(meters) < 1e-6) {
-            return this._runHardwareTimedCommand('copter_fly_distance', util, {
-                durationMs: 1,
-                start: () => { },
-                finish: () => this.init_start_coordinates()
-            });
-        }
+        // --- Hardware path: HL relative go_to; the offset is turned from the copter's axes into the world frame. ---
+        const meters = Cast.toNumber(args.METERS);
+        return this._runHardwareHlMove('copter_fly_distance', util, () => this._hardwareWorldOffset(meters, this.dir));
+    }
 
-        return this._runHardwareTargetCommand('copter_fly_distance', util, {
-            timeoutMs: HARDWARE_LONG_TARGET_COMMAND_TIMEOUT_MS,
-            intervalMs: 200,
-            prepare: () => {
-                this.init_start_coordinates();
-                // HL go_to(relative): dx/dy in body frame (cflib MotionCommander convention).
-                const {bdx, bdy} = this._hardwareBodyOffsetMeters(meters, this.dir);
-                const {dx, dy} = this._hardwareWorldDeltaFromBody(bdx, bdy, this.yaw);
-                const tx = this.x + dx;
-                const ty = this.y + dy;
-                const tz = Number(this.QCA.get_coord('Z'));
-                const moveVel = this._hardwareSpeedMps();
-                const durationS = Math.max(0.25, Math.abs(meters) / moveVel);
-                const yawRad = 0;
-                const deadlineMs = Date.now() + durationS * 1000 + HARDWARE_HL_EXTRA_WAIT_MS;
-                return {
-                    dx: bdx, dy: bdy, tx, ty, tz, yawRad, durationS, deadlineMs,
-                    startX: this.x, startY: this.y, startZ: this.z,
-                    hlScheduled: false
-                };
-            },
-            dispatch: context => {
-                if (context.hlScheduled) return;
-                context.hlScheduled = true;
-                this.QCA.goToHighLevel(context.dx, context.dy, 0, context.yawRad, context.durationS, { relative: true, forceLegacy: true });
-            },
-            isDone: context => {
-                if (!this.QCA.isQuadcopterConnected()) return true;
-                const x = Number(this.QCA.get_coord('X'));
-                const y = Number(this.QCA.get_coord('Y'));
-                const z = Number(this.QCA.get_coord('Z'));
-                if (![x, y, z].every(Number.isFinite)) return false;
-                const distanceToTarget = Math.hypot(x - context.tx, y - context.ty, z - context.tz);
-                const reachedTarget = distanceToTarget < HARDWARE_POS_TOL_M;
-                const deadlineReached = Date.now() >= context.deadlineMs;
-                return reachedTarget || deadlineReached;
-            },
-            finish: () => {
-                this.QCA.hoverStop();
-                this.init_start_coordinates();
-            }
-        });
+    /**
+     * Offset along a body direction (degrees from the nose, CCW) turned into the world frame by the
+     * current heading: relative go_to adds offsets in world coordinates.
+     * @param {number} meters distance
+     * @param {number} dirDeg body direction
+     * @returns {{dx: number, dy: number, dz: number}} world offset (m)
+     */
+    _hardwareWorldOffset(meters, dirDeg) {
+        const {bdx, bdy} = this._hardwareBodyOffsetMeters(meters, dirDeg);
+        const {dx, dy} = this._hardwareWorldDeltaFromBody(bdx, bdy, this.yaw);
+        return {dx, dy, dz: 0};
     }
 
     copter_fly_time(args, util) {
@@ -1309,22 +1204,12 @@ class CopterController {
             return;
         }
 
-        // --- Hardware path ---
-        return this._runHardwareTimedCommand('copter_fly_time', util, {
-            durationMs: Number(args.SECONDS) * 1000,
-            start: () => {
-                this.init_start_coordinates();
-                this.z = Number(this.QCA.get_coord("Z"));
-                const {vx, vy} = this._hardwareBodyVelocity(this._hardwareSpeedMps(), this.dir);
-                this.QCA.move_with_speed(vx, vy, 0, this.z);
-            },
-            finish: () => {
-                this.x = this.QCA.get_coord("X");
-                this.y = this.QCA.get_coord("Y");
-                this.QCA.hoverStop();
-                this.init_start_coordinates();
-            }
-        });
+        // --- Hardware path: HL relative go_to over the block time (speed × time along the direction). ---
+        const seconds = Math.max(0, Cast.toNumber(args.SECONDS));
+        return this._runHardwareHlMove('copter_fly_time', util, () => Object.assign(
+            this._hardwareWorldOffset(this._hardwareSpeedMps() * seconds, this.dir),
+            {durationS: seconds}
+        ));
     }
 
     copter_fly_for_time_with_speed(args, util) {
@@ -1360,20 +1245,21 @@ class CopterController {
             return;
         }
 
-        // --- Hardware path ---
-        return this._runHardwareTimedCommand('copter_fly_for_time_with_speed', util, {
-            durationMs: Number(args.SECONDS) * 1000,
-            start: () => {
-                const vx = Number(args.X_SPEED);
-                const vy = Number(args.Y_SPEED);
-                this.z = Number(this.QCA.get_coord("Z"));
-                this.QCA.move_with_speed(vx, vy, 0, this.z);
-            },
-            finish: () => {
-                this.QCA.hoverStop();
-                this.init_start_coordinates();
-            }
-        });
+        // --- Hardware path: HL relative go_to of speed × time in the world frame (Y as in the simulator). ---
+        const seconds = Math.max(0, Cast.toNumber(args.SECONDS));
+        let vx = Cast.toNumber(args.X_SPEED);
+        let vy = -Cast.toNumber(args.Y_SPEED);
+        const speed = Math.hypot(vx, vy);
+        if (speed > HARDWARE_MAX_SPEED_MPS) {
+            vx *= HARDWARE_MAX_SPEED_MPS / speed;
+            vy *= HARDWARE_MAX_SPEED_MPS / speed;
+        }
+        return this._runHardwareHlMove('copter_fly_for_time_with_speed', util, () => ({
+            dx: vx * seconds,
+            dy: vy * seconds,
+            dz: 0,
+            durationS: seconds
+        }));
     }
 
     copter_change_x_by(args, util) {
@@ -1404,25 +1290,9 @@ class CopterController {
             return;
         }
 
-        // --- Hardware path ---
-        this.init_start_coordinates();
-        const dx = Number(args.DISTANCE_DELTA);
-        const v = this._hardwareSpeedMps();
-        const durationMs = Math.abs(dx) < 1e-6
-            ? 1
-            : Math.max(3000, (Math.abs(dx) / v) * 1000);
-        const vx = (dx >= 0 ? 1 : -1) * v;
-        return this._runHardwareTimedCommand('copter_change_x_by', util, {
-            durationMs,
-            start: () => {
-                this.z = Number(this.QCA.get_coord("Z"));
-                this.QCA.move_with_speed(vx, 0, 0, this.z);
-            },
-            finish: () => {
-                this.QCA.hoverStop();
-                this.init_start_coordinates();
-            }
-        });
+        // --- Hardware path: HL relative go_to along world X. ---
+        const dx = Cast.toNumber(args.DISTANCE_DELTA);
+        return this._runHardwareHlMove('copter_change_x_by', util, () => ({dx: dx, dy: 0, dz: 0}));
     }
 
     copter_change_y_by(args, util) {
@@ -1453,25 +1323,9 @@ class CopterController {
             return;
         }
 
-        // --- Hardware path ---
-        this.init_start_coordinates();
-        const dy = -Number(args.DISTANCE_DELTA);
-        const v = this._hardwareSpeedMps();
-        const durationMs = Math.abs(dy) < 1e-6
-            ? 1
-            : Math.max(3000, (Math.abs(dy) / v) * 1000);
-        const vy = (dy >= 0 ? 1 : -1) * v;
-        return this._runHardwareTimedCommand('copter_change_y_by', util, {
-            durationMs,
-            start: () => {
-                this.z = Number(this.QCA.get_coord("Z"));
-                this.QCA.move_with_speed(0, vy, 0, this.z);
-            },
-            finish: () => {
-                this.QCA.hoverStop();
-                this.init_start_coordinates();
-            }
-        });
+        // --- Hardware path: HL relative go_to along world Y (Scratch Y is the copter's -Y). ---
+        const dy = -Cast.toNumber(args.DISTANCE_DELTA);
+        return this._runHardwareHlMove('copter_change_y_by', util, () => ({dx: 0, dy: dy, dz: 0}));
     }
 
     copter_change_z_by(args, util) {
@@ -1503,29 +1357,9 @@ class CopterController {
             return;
         }
 
-        // --- Hardware path ---
-        if (Number(this.QCA.get_coord('Z')) + Number(args.DISTANCE_DELTA) <= GROUND_TARGET_Z_M) {
-            return this.copter_land({}, util);
-        }
-        return this._runHardwareTargetCommand('copter_change_z_by', util, {
-            prepare: () => {
-                this.init_start_coordinates();
-                const startZ = this.z;
-                this.z = this.z + Number(args.DISTANCE_DELTA);
-                return this._startHeightRamp(startZ);
-            },
-            dispatch: context => {
-                this.QCA.move_with_speed(0, 0, 0, this._stepHeightRamp(context, this.z));
-            },
-            isDone: () => {
-                this.nowz = Number(this.QCA.get_coord("Z"));
-                return Math.abs(this.nowz - this.z) < this.delta;
-            },
-            finish: () => {
-                this.QCA.hoverStop();
-                this.init_start_coordinates();
-            }
-        });
+        // --- Hardware path: HL relative go_to; down to the floor is a landing (decided at the start). ---
+        const dz = Cast.toNumber(args.DISTANCE_DELTA);
+        return this._runHardwareHlMove('copter_change_z_by', util, () => ({dx: 0, dy: 0, dz: dz}));
     }
 
     copter_x_coord(args, util) {
@@ -1601,25 +1435,12 @@ class CopterController {
             return;
         }
 
-        // --- Hardware path ---
-        return this._runHardwareTimedCommand('copter_fly_for_seconds_to_coords', util, {
-            durationMs: Number(args.SECONDS) * 1000,
-            start: () => {
-                this.x_telemetry_delta = this.QCA.get_x_telemetry_delta();
-                this.y_telemetry_delta = this.QCA.get_y_telemetry_delta();
-                this.init_start_coordinates();
-                const sec = Number(args.SECONDS);
-                const targetX = Number(args.X_COORD) + this.x_telemetry_delta;
-                const targetY = (Number(args.Y_COORD) * -1) + this.y_telemetry_delta;
-                const vx = sec > 0 ? (targetX - this.x) / sec : 0;
-                const vy = sec > 0 ? (targetY - this.y) / sec : 0;
-                this.z = Number(args.Z_COORD);
-                this.QCA.move_with_speed(vx, vy, 0, this.z);
-            },
-            finish: () => {
-                this.QCA.hoverStop();
-                this.init_start_coordinates();
-            }
+        // --- Hardware path: HL relative go_to to the point over the given time. ---
+        const targetX = Cast.toNumber(args.X_COORD) + Number(this.QCA.get_x_telemetry_delta());
+        const targetY = -Cast.toNumber(args.Y_COORD) + Number(this.QCA.get_y_telemetry_delta());
+        return this._hardwareFlyToWorld(targetX, targetY, Cast.toNumber(args.Z_COORD), util, {
+            commandKey: 'copter_fly_for_seconds_to_coords',
+            durationS: Math.max(0, Cast.toNumber(args.SECONDS))
         });
     }
 
@@ -1661,63 +1482,82 @@ class CopterController {
     }
 
     /**
-     * Hardware path: fly to world coordinates without changing heading.
-     * Uses HL relative go_to with a world-frame offset and yaw offset 0: the onboard
-     * planner adds the offset in world coordinates and keeps its current setpoint yaw
-     * (planner.c plan_go_to_from), so coordinates stay exact and the craft does not rotate.
-     * @param {number} tx
-     * @param {number} ty
-     * @param {number} tz
-     * @param {object} util
+     * Hardware path: fly to world coordinates without changing heading (see {@link _runHardwareHlMove}).
+     * @param {number} tx world X (m, telemetry frame)
+     * @param {number} ty world Y (m, telemetry frame)
+     * @param {number} targetZ height (m); at ground level the copter lands there
+     * @param {object} util block util
+     * @param {object} [opts] commandKey: coordinator key; durationS: fixed flight time
+     * @returns {undefined}
      */
-    _hardwareFlyToWorld(tx, ty, targetZ, util) {
-        // A target on the ground is a landing: fly over the point low, then land there.
-        const landAfter = targetZ <= GROUND_TARGET_Z_M;
-        const tz = landAfter ? HARDWARE_PRE_LAND_HEIGHT_M : targetZ;
-        return this._runHardwareTargetCommand('copter_fly_to_coords', util, {
+    _hardwareFlyToWorld(tx, ty, targetZ, util, opts) {
+        const options = opts || {};
+        return this._runHardwareHlMove(options.commandKey || 'copter_fly_to_coords', util, () => {
+            const dx = tx - this.x;
+            const dy = ty - this.y;
+            const dz = targetZ - this.z;
+            return {dx, dy, dz, durationS: options.durationS};
+        });
+    }
+
+    /**
+     * Hardware move as one relative HL go_to: the onboard planner flies the offset and then holds
+     * the point by itself. Nothing is streamed, so a lost link does not stop the motors, and the
+     * height follows the command instead of the drifting estimate.
+     *
+     * Firmware relative go_to adds the offset in the WORLD frame (planner.c: hover_pos =
+     * vadd(hover_pos, curr_pos)) and adds the yaw offset to the current heading.
+     *
+     * @param {string} commandKey coordinator key of the block
+     * @param {object} util block util
+     * @param {Function} plan returns the offset from the pose at the start, called once when the block
+     *   starts: {dx, dy, dz} in m (world frame), optional dyawDeg (CCW) and durationS (defaults to
+     *   path length / speed). A target at ground level is a landing.
+     * @returns {undefined}
+     */
+    _runHardwareHlMove(commandKey, util, plan) {
+        if (!this.commandCoordinator.isRunning(commandKey, util) && !this._hardwareCanMove()) {
+            return;
+        }
+        return this._runHardwareTargetCommand(commandKey, util, {
             timeoutMs: HARDWARE_LONG_TARGET_COMMAND_TIMEOUT_MS,
-            intervalMs: 200,
+            intervalMs: 100,
             prepare: () => {
                 this.init_start_coordinates();
-                // Firmware relative go_to adds the offset in the WORLD frame
-                // (planner.c: hover_pos = vadd(hover_pos, curr_pos)) and keeps the
-                // current heading when yaw offset is 0 — so no rotation, exact coords.
-                const dx = tx - this.x;
-                const dy = ty - this.y;
+                const step = plan() || {};
+                const dx = Number(step.dx) || 0;
+                const dy = Number(step.dy) || 0;
+                const dyawDeg = Number(step.dyawDeg) || 0;
+                const wantedZ = this.z + (Number(step.dz) || 0);
+                // A target on the ground is a landing: fly over the point low, then land there.
+                const landAfter = wantedZ <= GROUND_TARGET_Z_M;
+                const tz = landAfter ? Math.min(this.z, HARDWARE_PRE_LAND_HEIGHT_M) : wantedZ;
                 const dz = tz - this.z;
                 const pathLen = Math.hypot(dx, dy, dz);
-                if (pathLen < 1e-6 && !landAfter) {
-                    return { skip: true };
+                if (pathLen < 1e-6 && Math.abs(dyawDeg) < 0.5 && !landAfter) {
+                    return {skip: true};
                 }
-                const moveVel = this._hardwareSpeedMps();
-                const durationS = Math.max(0.25, pathLen / moveVel);
-                const yawRad = 0;
-                const deadlineMs = Date.now() + durationS * 1000 + HARDWARE_HL_EXTRA_WAIT_MS;
+                const fixed = Number(step.durationS);
+                const durationS = Number.isFinite(fixed) && fixed > 0 ?
+                    Math.max(0.25, fixed) :
+                    Math.max(0.25, pathLen / this._hardwareSpeedMps(),
+                        Math.abs(dyawDeg) / HARDWARE_YAW_RATE_DPS);
+                // Sent right away: the block must not finish before the copter got its command.
+                this.QCA.goToHighLevel(dx, dy, dz, dyawDeg * Math.PI / 180, durationS,
+                    {relative: true, forceLegacy: true});
                 return {
                     skip: false,
                     landAfter: landAfter,
                     landing: false,
-                    dx: dx,
-                    dy: dy,
-                    dz: dz,
-                    tx: tx,
-                    ty: ty,
+                    tx: this.x + dx,
+                    ty: this.y + dy,
                     tz: tz,
-                    yawRad: yawRad,
-                    durationS: durationS,
-                    deadlineMs: deadlineMs,
-                    hlScheduled: false
+                    tyawDeg: this.yaw + dyawDeg,
+                    deadlineMs: Date.now() + (durationS * 1000) + HARDWARE_HL_EXTRA_WAIT_MS
                 };
             },
-            dispatch: context => {
-                if (context.skip || context.hlScheduled) {
-                    return;
-                }
-                context.hlScheduled = true;
-                this.QCA.goToHighLevel(
-                    context.dx, context.dy, context.dz, context.yawRad, context.durationS,
-                    {relative: true, forceLegacy: true}
-                );
+            dispatch: () => {
+                // The go_to was sent in prepare; the planner flies and holds on board.
             },
             isDone: context => {
                 if (context.skip) {
@@ -1726,34 +1566,46 @@ class CopterController {
                 if (!this.QCA.isQuadcopterConnected()) {
                     return true;
                 }
+                if (context.landing) {
+                    return Date.now() >= context.landDeadlineMs ||
+                        (Date.now() >= context.landStartedMs + 500 && !this.copter_is_flying());
+                }
                 const x = Number(this.QCA.get_coord('X'));
                 const y = Number(this.QCA.get_coord('Y'));
                 const z = Number(this.QCA.get_coord('Z'));
-                if (![x, y, z].every(Number.isFinite)) {
-                    return false;
-                }
-                if (context.landing) {
-                    return Date.now() >= context.landDeadlineMs;
-                }
-                const distanceToTarget = Math.hypot(x - context.tx, y - context.ty, z - context.tz);
-                const reachedTarget = distanceToTarget < HARDWARE_POS_TOL_M;
+                const snap = this.QCA.getTelemetrySnapshot();
+                const yawDeg = Number(snap && snap.yawDeg);
+                const atPoint = [x, y, z].every(Number.isFinite) &&
+                    Math.hypot(x - context.tx, y - context.ty, z - context.tz) < HARDWARE_POS_TOL_M;
+                const atHeading = !Number.isFinite(yawDeg) ||
+                    Math.abs(this._shortestYawDeltaDeg(yawDeg, context.tyawDeg)) < HARDWARE_YAW_TOL_DEG;
+                const reached = atPoint && atHeading;
                 const deadlineReached = Date.now() >= context.deadlineMs;
-                if ((reachedTarget || deadlineReached) && context.landAfter) {
-                    const landOpts = { velocityMps: this._hardwareSpeedMps() };
+                if ((reached || deadlineReached) && context.landAfter) {
+                    const landOpts = {velocityMps: this._hardwareSpeedMps()};
                     context.landing = true;
-                    context.landDeadlineMs = Date.now() + this.QCA.computeHlLandWaitMs(landOpts);
+                    context.landStartedMs = Date.now();
+                    context.landDeadlineMs = Date.now() + this.QCA.computeHlLandWaitMs(landOpts) + 2000;
                     this.QCA.landAndClose(landOpts);
                     return false;
                 }
-                return reachedTarget || deadlineReached;
+                return reached || deadlineReached;
             },
-            finish: context => {
-                if (!context || !context.landing) {
-                    this.QCA.hoverStop();
-                }
+            finish: () => {
+                // The planner already holds the reached point: nothing to send.
                 this.init_start_coordinates();
             }
         });
+    }
+
+    /**
+     * A move block may start: the copter is in the air (on the ground moves do nothing, as in the
+     * simulator) and is not landing on its own because of the battery or the link.
+     * @returns {boolean} true when the move may start
+     */
+    _hardwareCanMove() {
+        if (!this.copter_is_flying()) return false;
+        return !(typeof this.QCA.isSafetyLanding === 'function' && this.QCA.isSafetyLanding());
     }
 
     copter_fly_to_coords(args, util) {
@@ -1800,7 +1652,7 @@ class CopterController {
     }
 
     copter_rotate(args, util) {
-        const magnitude = Math.abs(Number(args.DEGREES));
+        const magnitude = Math.abs(Cast.toNumber(args.DEGREES));
         const side = this._normalizeTurnSide(args.SIDE);
         const signedDeg = side === 'left' ? -magnitude : magnitude;
 
@@ -1828,53 +1680,18 @@ class CopterController {
             return;
         }
 
-        // --- Hardware path ---
-        if (!this._yieldUntilVelocityStreamingReady(util)) {
-            return;
-        }
-        const rotateOwnerId = util.thread && util.thread.topBlock
-            ? String(util.thread.topBlock)
-            : '';
-        const activeRotate = this.commandCoordinator.activeCommand;
-        const rotateInProgress = activeRotate &&
-            activeRotate.key === 'copter_rotate' &&
-            activeRotate.ownerId === rotateOwnerId;
-        if (!rotateInProgress) {
-            this.init_start_coordinates();
-            const turn = signedDeg;
-            const yawRateDps = Math.min(
-                HARDWARE_MAX_YAW_RATE_DPS,
-                HARDWARE_YAW_RATE_DPS * this._hardwareSpeedMps() / DEFAULT_SPEED_MPS
-            );
-            const durationMs = (magnitude / yawRateDps) * 1000;
-            const yawRate = magnitude < 1e-3 ? 0 : Math.sign(turn) * yawRateDps;
-            this._hwRotatePlan = {
-                ownerId: rotateOwnerId,
-                side,
-                signedDeg,
-                turn,
-                durationMs,
-                yawRate
-            };
-        }
-        const plan = this._hwRotatePlan;
-        if (!plan) return;
-        return this._runHardwareTimedCommand('copter_rotate', util, {
-            durationMs: plan.durationMs,
-            start: () => {
-                this.z = Number(this.QCA.get_coord('Z'));
-                this.QCA.move_with_speed(0, 0, plan.yawRate, this.z);
-                return plan;
-            },
-            finish: () => {
-                this.QCA.hoverStop();
-                this.init_start_coordinates();
-                this._hwRotatePlan = null;
-            },
-            cancel: () => {
-                this._hwRotatePlan = null;
-            }
-        });
+        // --- Hardware path: HL relative go_to with a yaw offset only (CCW positive). ---
+        const yawRateDps = Math.min(
+            HARDWARE_MAX_YAW_RATE_DPS,
+            HARDWARE_YAW_RATE_DPS * this._hardwareSpeedMps() / DEFAULT_SPEED_MPS
+        );
+        return this._runHardwareHlMove('copter_rotate', util, () => ({
+            dx: 0,
+            dy: 0,
+            dz: 0,
+            dyawDeg: -signedDeg,
+            durationS: magnitude / yawRateDps
+        }));
     }
 
     copter_set_direction(args) {

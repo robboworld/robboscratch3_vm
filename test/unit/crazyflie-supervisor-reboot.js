@@ -121,6 +121,7 @@ test('session: hoverStop on the ground does not stream setpoints', t => {
 test('session: search is refused while airborne', t => {
     const {session} = makeConnectedSession();
     session.telemetryStore.getValue = () => 0.6;
+    session.telemetryStore.hasReceivedField = () => true;
     return session.search().then(ok => {
         t.equal(ok, false);
         t.equal(session.status.lastError.code, 'searchRefusedInFlight');
