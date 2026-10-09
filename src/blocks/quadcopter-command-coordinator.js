@@ -34,6 +34,12 @@ class QuadcopterCommandCoordinator {
         }
     }
 
+    /** @returns {boolean} this thread already runs the command (the block is re-entered while waiting) */
+    isRunning (key, util) {
+        return Boolean(this._activeCommand && this._activeCommand.key === key &&
+            this._activeCommand.ownerId === this._getOwnerId(util));
+    }
+
     runTargetCommand (key, util, handlers) {
         return this._runCommand('target', key, util, handlers);
     }
