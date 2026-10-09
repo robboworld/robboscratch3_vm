@@ -5,17 +5,33 @@ const Cast = require('../../util/cast');
 const formatMessage = require('format-message');
 const MathUtil = require('../../util/math-util');
 const Timer = require('../../util/timer');
+const log = require('../../util/log');
 
 /**
- * The instrument and drum sounds, loaded as static assets.
- * @type {object}
+ * The instrument and drum sounds are separate files next to the editor (the GUI build copies
+ * assets/ to static/extensions/music/) fetched when the extension starts: bundled into the VM
+ * they added ~1.4 MB to every page load, whether the project used music or not.
+ * @type {string}
  */
-let assetData = {};
-try {
-    assetData = require('./manifest');
-} catch (e) {
-    // Non-webpack environment, don't worry about assets.
-}
+const SAMPLES_PATH = 'static/extensions/music/';
+
+/**
+ * Download one sample, relative to the editor page.
+ * @param {string} fullPath - e.g. drums/1-snare.mp3
+ * @return {Promise<?ArrayBuffer>} the encoded audio; null outside a browser (tests, node)
+ */
+const fetchSample = function (fullPath) {
+    if (typeof fetch !== 'function' || typeof document === 'undefined') {
+        return Promise.resolve(null);
+    }
+    return fetch(new URL(SAMPLES_PATH + fullPath, document.baseURI).toString())
+        .then(response => {
+            if (!response.ok) {
+                throw new Error(`HTTP ${response.status}`);
+            }
+            return response.arrayBuffer();
+        });
+};
 
 /**
  * Icon svg to be displayed at the left edge of each extension block, encoded as a data URI.
@@ -124,14 +140,14 @@ class Scratch3MusicBlocks {
     _storeSound (filePath, index, playerArray) {
         const fullPath = `${filePath}.mp3`;
 
-        if (!assetData[fullPath]) return;
-
-        // The sound player has already been downloaded via the manifest file required above.
-        const soundBuffer = assetData[fullPath];
-
-        return this._decodeSound(soundBuffer).then(player => {
-            playerArray[index] = player;
-        });
+        return fetchSample(fullPath)
+            .then(soundBuffer => soundBuffer && this._decodeSound(soundBuffer))
+            .then(player => {
+                if (player) playerArray[index] = player;
+            })
+            .catch(err => {
+                log.warn(`Failed to load music sample ${fullPath}`, err);
+            });
     }
 
     /**
