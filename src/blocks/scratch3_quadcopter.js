@@ -184,7 +184,7 @@ class Scratch3QuadcopterBlocks {
     _runCommand (opcode, args, util) {
         const ids = this._targetIds(util);
         if (ids.length === 1) {
-            return this._runOnController(this.getController(ids[0]), opcode, args, util, false);
+            return this._runOnController(this.getController(ids[0]), opcode, args, util);
         }
         const frame = util.stackFrame;
         if (!frame.copterSwarm || frame.copterSwarm.opcode !== opcode) {
@@ -197,7 +197,7 @@ class Scratch3QuadcopterBlocks {
             copterUtil.yield = () => {
                 yielded = true;
             };
-            this._runOnController(this.getController(id), opcode, args, copterUtil, true);
+            this._runOnController(this.getController(id), opcode, args, copterUtil);
             if (yielded) stillRunning.push(id);
         });
         if (stillRunning.length > 0) {
@@ -208,14 +208,9 @@ class Scratch3QuadcopterBlocks {
         }
     }
 
-    _runOnController (controller, opcode, args, util, inSwarm) {
+    _runOnController (controller, opcode, args, util) {
         if (this.runtime.sim_copter_ac && controller.sim_battery <= 0 && SIM_FLIGHT_OPCODES.has(opcode)) {
             return;
-        }
-        if (inSwarm && !this.runtime.sim_copter_ac && opcode === 'copter_fly_time') {
-            // Swarm on one radio: an onboard HL trajectory instead of 10 setpoints/s per copter.
-            const meters = controller._hardwareSpeedMps() * Math.max(0, Cast.toNumber(args.SECONDS));
-            return controller.copter_fly_distance({DIRECTION: args.DIRECTION, METERS: meters}, util);
         }
         return controller[opcode](args, util);
     }

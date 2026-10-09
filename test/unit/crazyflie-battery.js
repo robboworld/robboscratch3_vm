@@ -105,7 +105,7 @@ test('battery: the flight to the landing on 09.10.2026 reaches 0 without jumps',
     let prev = start;
     let jumps = 0;
     for (let s = 0; s < 180; s++) {
-        const loaded = s < 170 ? 3.43 - s * 0.0012 : 3.22 - (s - 170) * 0.003; // plateau, then the end
+        const loaded = s < 170 ? 3.43 - (s * 0.0012) : 3.22 - ((s - 170) * 0.003); // plateau, then the end
         policy.update({vbat: loaded, flying: true}, now);
         now += 1000;
         const p = policy.getState().percent;
@@ -200,5 +200,31 @@ test('battery: a glitch sample after a reconnect in the air does not zero the pe
     policy.update({vbat: 3.1, flying: true}, now + 1000);
     policy.update({vbat: 3.5, flying: true}, now + 1500);
     t.ok(policy.getState().percent >= air - 2, `kept ${policy.getState().percent} % (was ${air} %)`);
+    t.end();
+});
+
+test('battery: motors spinning up before the takeoff do not lower the takeoff percent', t => {
+    // 09.10.2026: 23 % on the ground, 17 % right after the takeoff — loaded samples in the average.
+    const policy = new BatteryPolicy();
+    let now = feed(policy, 0, 6000, 3.84, false);
+    const ground = policy.getState().percent;
+    now = feed(policy, now, now + 1000, 3.46, false);
+    t.equal(policy.getState().percent, ground, 'spin-up on the ground: the display holds');
+    policy.update({vbat: 3.46, flying: true}, now);
+    t.equal(policy.getState().percent, ground, 'the takeoff starts from the ground value');
+    t.end();
+});
+
+test('battery: while the loaded voltage carries the copter the percent does not hit 0 early', t => {
+    // 09.10.2026: 0 % by time at 3.33 V loaded, then 24 s more hover down to 3.28 V.
+    const policy = new BatteryPolicy();
+    let now = feed(policy, 0, 5000, 3.82, false);
+    now = feed(policy, now, now + 60000, 3.33, true);
+    const held = policy.getState().percent;
+    t.ok(held >= 4 && held <= 6, `time is up, 3.33 V loaded: ${held} %`);
+    now = feed(policy, now, now + 20000, 3.28, true);
+    t.ok(policy.getState().percent > 0 && policy.getState().percent <= held, `3.28 V: ${policy.getState().percent} %`);
+    feed(policy, now, now + 5000, 3.2, true);
+    t.equal(policy.getState().percent, 0, 'at the firmware landing voltage: 0');
     t.end();
 });
