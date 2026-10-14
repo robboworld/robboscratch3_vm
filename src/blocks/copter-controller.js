@@ -4,12 +4,7 @@ const Timer = require('../util/timer');
 const QuadcopterCommandCoordinator = require('./quadcopter-command-coordinator');
 const Thread = require('../engine/thread');
 const formatMessage = require('format-message');
-const {
-    COPTER_DIR_MSG,
-    COPTER_DIR_DEGREES,
-    COPTER_DIR_LABELS_BY_LOCALE,
-    normalizeCopterDirectionArg
-} = require('../util/copter-direction-arg');
+const {COPTER_DIR_DEGREES, normalizeCopterDirectionArg} = require('../util/copter-direction-arg');
 
 /** Turn side labels for copter_rotate / copter_turn_sides (scratch-l10n + fallback). */
 const COPTER_TURN_SIDE_MSG = {
@@ -116,7 +111,6 @@ class CopterController {
         this.yaw = this.QCA.get_coord("W");
         this.noww = 0;
         this.dir = 0;
-        this.flightDirKey = 'forward';
         this.fack = 0;
         this.delta = 0.01;
         this.speed = DEFAULT_SPEED_MPS;
@@ -828,6 +822,12 @@ class CopterController {
                 }
             }
             if (this.fack === 0) {
+                // As on a real copter (the estimator restarts before each takeoff), the takeoff
+                // point becomes (0, 0); the sprite stays where it is.
+                this.sim_origin_x += this.sim_x;
+                this.sim_origin_y += this.sim_y;
+                this.sim_x = 0;
+                this.sim_y = 0;
                 this._sim_target_z = TAKEOFF_HEIGHT_M;
                 this.sim_is_flying = true;
                 this._simStartMoveToCoord(this.sim_x, this.sim_y, this._sim_target_z, this.sim_yaw, {
@@ -992,26 +992,8 @@ class CopterController {
         }
     }
 
-    copter_status(args, util) {
-        if (this.runtime.sim_copter_ac) {
-            if (!this._getSimCopterTarget()) {
-                this._disableSimByMissingSprite();
-                return false;
-            }
-            return true;
-        }
-        return (this.QCA.isQuadcopterConnected());
-    }
-
     _isVerticalFlightDirection(dirKey) {
         return dirKey === 'up' || dirKey === 'down';
-    }
-
-    _resolveFlightDirectionFromArgs(args) {
-        if (args.DIRECTION !== undefined) {
-            return this._normalizeDirectionArg(args.DIRECTION);
-        }
-        return this.flightDirKey || 'forward';
     }
 
     _copterFlyDistanceVertical(dirKey, meters, util) {
@@ -1095,18 +1077,26 @@ class CopterController {
         }));
     }
 
-    copter_fly_distance(args, util) {
-        if (this.fack === 0 && args.DIRECTION !== undefined) {
-            const dirKey = this._normalizeDirectionArg(args.DIRECTION);
-            if (this._isVerticalFlightDirection(dirKey)) {
-                this.flightDirKey = dirKey;
-            } else {
-                this._applyDirectionKey(dirKey);
-            }
+    /**
+     * `fly [direction] (N) [meters ▾ / seconds ▾]`.
+     * @param {object} args DIRECTION, AMOUNT, UNIT ('meters' | 'seconds')
+     * @param {object} util block utility
+     * @returns {*} undefined; yields while the copter flies
+     */
+    copter_fly(args, util) {
+        if (args.UNIT === 'seconds') {
+            return this._flyTime({DIRECTION: args.DIRECTION, SECONDS: args.AMOUNT}, util);
         }
-        const activeDirKey = this._resolveFlightDirectionFromArgs(args);
-        if (this._isVerticalFlightDirection(activeDirKey)) {
-            return this._copterFlyDistanceVertical(activeDirKey, args.METERS, util);
+        return this._flyDistance({DIRECTION: args.DIRECTION, METERS: args.AMOUNT}, util);
+    }
+
+    _flyDistance(args, util) {
+        const dirKey = this._normalizeDirectionArg(args.DIRECTION);
+        if (this._isVerticalFlightDirection(dirKey)) {
+            return this._copterFlyDistanceVertical(dirKey, args.METERS, util);
+        }
+        if (this.fack === 0) {
+            this.dir = COPTER_DIR_DEGREES[dirKey] || 0;
         }
         if (this.runtime.sim_copter_ac) {
             if (!this._ensureSimCopterSprite(util)) return;
@@ -1158,18 +1148,13 @@ class CopterController {
         return {dx, dy, dz: 0};
     }
 
-    copter_fly_time(args, util) {
-        if (this.fack === 0 && args.DIRECTION !== undefined) {
-            const dirKey = this._normalizeDirectionArg(args.DIRECTION);
-            if (this._isVerticalFlightDirection(dirKey)) {
-                this.flightDirKey = dirKey;
-            } else {
-                this._applyDirectionKey(dirKey);
-            }
+    _flyTime(args, util) {
+        const dirKey = this._normalizeDirectionArg(args.DIRECTION);
+        if (this._isVerticalFlightDirection(dirKey)) {
+            return this._copterFlyTimeVertical(dirKey, args.SECONDS, util);
         }
-        const activeDirKey = this._resolveFlightDirectionFromArgs(args);
-        if (this._isVerticalFlightDirection(activeDirKey)) {
-            return this._copterFlyTimeVertical(activeDirKey, args.SECONDS, util);
+        if (this.fack === 0) {
+            this.dir = COPTER_DIR_DEGREES[dirKey] || 0;
         }
         if (this.runtime.sim_copter_ac) {
             if (!this._ensureSimCopterSprite(util)) return;
@@ -1212,156 +1197,6 @@ class CopterController {
         ));
     }
 
-    copter_fly_for_time_with_speed(args, util) {
-        if (this.runtime.sim_copter_ac) {
-            if (!this._ensureSimCopterSprite(util)) return;
-            if (this.fack === 0) {
-                this._syncFromSpritePositionIfNeeded();
-                if (!this._simCanExecuteAirCommand()) return;
-            }
-            if (this.fack === 0) {
-                const vx = Number(args.X_SPEED);
-                const vy = Number(args.Y_SPEED);
-                this._simClearInterval();
-                this.sim_interval = setInterval(() => {
-                    this.sim_x += vx * (SIM_STEP_MS / 1000);
-                    this.sim_y += vy * (SIM_STEP_MS / 1000);
-                    this._simApplyState();
-                }, SIM_STEP_MS);
-                this.fack = 1;
-                const time_to_fly = Number(args.SECONDS) * 1000;
-                this._simAddTimeout(() => {
-                    this.fack = 2;
-                }, time_to_fly);
-                util.yield();
-                return;
-            } else if (this.fack !== 2) {
-                util.yield();
-                return;
-            }
-            this._simClearInterval();
-            this._simApplyState();
-            this.fack = 0;
-            return;
-        }
-
-        // --- Hardware path: HL relative go_to of speed × time in the world frame (Y as in the simulator). ---
-        const seconds = Math.max(0, Cast.toNumber(args.SECONDS));
-        let vx = Cast.toNumber(args.X_SPEED);
-        let vy = -Cast.toNumber(args.Y_SPEED);
-        const speed = Math.hypot(vx, vy);
-        if (speed > HARDWARE_MAX_SPEED_MPS) {
-            vx *= HARDWARE_MAX_SPEED_MPS / speed;
-            vy *= HARDWARE_MAX_SPEED_MPS / speed;
-        }
-        return this._runHardwareHlMove('copter_fly_for_time_with_speed', util, () => ({
-            dx: vx * seconds,
-            dy: vy * seconds,
-            dz: 0,
-            durationS: seconds
-        }));
-    }
-
-    copter_change_x_by(args, util) {
-        if (this.runtime.sim_copter_ac) {
-            if (!this._ensureSimCopterSprite(util)) return;
-            if (this.fack === 0) {
-                this._syncFromSpritePositionIfNeeded();
-                if (!this._simCanExecuteAirCommand()) return;
-            }
-            if (this.fack === 0) {
-                this.sim_x = this.sim_x + Number(args.DISTANCE_DELTA);
-                this._sim_target_x = this.sim_x;
-                this._simStartMoveToCoord(this.sim_x, this.sim_y, this.sim_z, this.sim_yaw);
-                this.yielded_time_start = Date.now();
-                this.fack = 1;
-                util.yield();
-                return;
-            } else if (this.fack !== 2) {
-                if ((Date.now() - this.yielded_time_start) >= this.yielded_max_time) this.fack = 2;
-                if (this._simIsAtTarget(this._sim_target_x, this.sim_y, this.sim_z, this.sim_yaw)) this.fack = 2;
-                util.yield();
-                return;
-            }
-            this._simClearInterval();
-            this.sim_x = this._sim_target_x;
-            this._simApplyState();
-            this.fack = 0;
-            return;
-        }
-
-        // --- Hardware path: HL relative go_to along world X. ---
-        const dx = Cast.toNumber(args.DISTANCE_DELTA);
-        return this._runHardwareHlMove('copter_change_x_by', util, () => ({dx: dx, dy: 0, dz: 0}));
-    }
-
-    copter_change_y_by(args, util) {
-        if (this.runtime.sim_copter_ac) {
-            if (!this._ensureSimCopterSprite(util)) return;
-            if (this.fack === 0) {
-                this._syncFromSpritePositionIfNeeded();
-                if (!this._simCanExecuteAirCommand()) return;
-            }
-            if (this.fack === 0) {
-                this.sim_y = this.sim_y - Number(args.DISTANCE_DELTA);
-                this._sim_target_y = this.sim_y;
-                this._simStartMoveToCoord(this.sim_x, this.sim_y, this.sim_z, this.sim_yaw);
-                this.yielded_time_start = Date.now();
-                this.fack = 1;
-                util.yield();
-                return;
-            } else if (this.fack !== 2) {
-                if ((Date.now() - this.yielded_time_start) >= this.yielded_max_time) this.fack = 2;
-                if (this._simIsAtTarget(this.sim_x, this._sim_target_y, this.sim_z, this.sim_yaw)) this.fack = 2;
-                util.yield();
-                return;
-            }
-            this._simClearInterval();
-            this.sim_y = this._sim_target_y;
-            this._simApplyState();
-            this.fack = 0;
-            return;
-        }
-
-        // --- Hardware path: HL relative go_to along world Y (Scratch Y is the copter's -Y). ---
-        const dy = -Cast.toNumber(args.DISTANCE_DELTA);
-        return this._runHardwareHlMove('copter_change_y_by', util, () => ({dx: 0, dy: dy, dz: 0}));
-    }
-
-    copter_change_z_by(args, util) {
-        if (this.runtime.sim_copter_ac) {
-            if (!this._ensureSimCopterSprite(util)) return;
-            if (this.fack === 0) {
-                this._syncFromSpritePositionIfNeeded();
-                if (!this._simCanExecuteAirCommand()) return;
-            }
-            if (this.fack === 0) {
-                this._sim_target_z = Math.max(0, this.sim_z + Number(args.DISTANCE_DELTA));
-                this._simStartMoveToCoord(this.sim_x, this.sim_y, this._sim_target_z, this.sim_yaw);
-                this.yielded_time_start = Date.now();
-                this.fack = 1;
-                util.yield();
-                return;
-            } else if (this.fack !== 2) {
-                if ((Date.now() - this.yielded_time_start) >= this.yielded_max_time) this.fack = 2;
-                if (this._simIsAtTarget(this.sim_x, this.sim_y, this._sim_target_z, this.sim_yaw)) this.fack = 2;
-                util.yield();
-                return;
-            }
-            this._simClearInterval();
-            this.sim_z = this._sim_target_z;
-            // Reaching the ground is a landing: motors stop and `in flight` turns false.
-            this._simEnsureFlyingFlagByAltitude();
-            this._simApplyState();
-            this.fack = 0;
-            return;
-        }
-
-        // --- Hardware path: HL relative go_to; down to the floor is a landing (decided at the start). ---
-        const dz = Cast.toNumber(args.DISTANCE_DELTA);
-        return this._runHardwareHlMove('copter_change_z_by', util, () => ({dx: 0, dy: 0, dz: dz}));
-    }
-
     copter_x_coord(args, util) {
         if (this.runtime.sim_copter_ac) {
             this._syncFromSpritePositionIfNeeded();
@@ -1386,62 +1221,6 @@ class CopterController {
     copter_z_coord(args, util) {
         if (this.runtime.sim_copter_ac) return Number(this.sim_z.toFixed(3));
         return Number(this.QCA.telemetry_palette_get_coord("Z"));
-    }
-
-    copter_fly_for_seconds_to_coords(args, util) {
-        if (this.runtime.sim_copter_ac) {
-            if (!this._ensureSimCopterSprite(util)) return;
-            if (this.fack === 0) {
-                this._syncFromSpritePositionIfNeeded();
-                if (!this._simCanExecuteAirCommand()) return;
-            }
-            if (this.fack === 0) {
-                const seconds = Number(args.SECONDS);
-                const tx = Number(args.X_COORD);
-                // Sim uses Scratch-aligned Y (same as sim_y / reporter); do not apply hardware Y flip.
-                const ty = Number(args.Y_COORD);
-                const tz = Number(args.Z_COORD);
-                const vx = seconds > 0 ? (tx - this.sim_x) / seconds : 0;
-                const vy = seconds > 0 ? (ty - this.sim_y) / seconds : 0;
-                const vz = seconds > 0 ? (tz - this.sim_z) / seconds : 0;
-                this._sim_flySecondsEndX = tx;
-                this._sim_flySecondsEndY = ty;
-                this._sim_flySecondsEndZ = tz;
-                this._simClearInterval();
-                this.sim_interval = setInterval(() => {
-                    this.sim_x += vx * (SIM_STEP_MS / 1000);
-                    this.sim_y += vy * (SIM_STEP_MS / 1000);
-                    this.sim_z = Math.max(0, this.sim_z + vz * (SIM_STEP_MS / 1000));
-                    this._simEnsureFlyingFlagByAltitude();
-                    this._simApplyState();
-                }, SIM_STEP_MS);
-                this.fack = 1;
-                this._simAddTimeout(() => {
-                    this.fack = 2;
-                }, seconds * 1000);
-                util.yield();
-                return;
-            } else if (this.fack !== 2) {
-                util.yield();
-                return;
-            }
-            this._simClearInterval();
-            this.sim_x = this._sim_flySecondsEndX;
-            this.sim_y = this._sim_flySecondsEndY;
-            this.sim_z = Math.max(0, this._sim_flySecondsEndZ);
-            this._simEnsureFlyingFlagByAltitude();
-            this._simApplyState();
-            this.fack = 0;
-            return;
-        }
-
-        // --- Hardware path: HL relative go_to to the point over the given time. ---
-        const targetX = Cast.toNumber(args.X_COORD) + Number(this.QCA.get_x_telemetry_delta());
-        const targetY = -Cast.toNumber(args.Y_COORD) + Number(this.QCA.get_y_telemetry_delta());
-        return this._hardwareFlyToWorld(targetX, targetY, Cast.toNumber(args.Z_COORD), util, {
-            commandKey: 'copter_fly_for_seconds_to_coords',
-            durationS: Math.max(0, Cast.toNumber(args.SECONDS))
-        });
     }
 
     /**
@@ -1694,11 +1473,6 @@ class CopterController {
         }));
     }
 
-    copter_set_direction(args) {
-        const raw = args.DIRECTION !== undefined ? args.DIRECTION : args.COPTER_DIRECTIONS;
-        this._applyDirectionKey(this._normalizeDirectionArg(raw));
-    }
-
     /**
      * @param {*} raw dropdown value, localized label, or legacy turn-side text
      * @returns {'left'|'right'}
@@ -1739,38 +1513,6 @@ class CopterController {
      */
     _normalizeDirectionArg(raw) {
         return normalizeCopterDirectionArg(raw);
-    }
-
-    _applyDirectionKey(key) {
-        this.flightDirKey = key;
-        this.dir = COPTER_DIR_DEGREES[key] !== undefined ? COPTER_DIR_DEGREES[key] : 0;
-    }
-
-    _dirKeyFromDegrees(degrees) {
-        const d = Number(degrees);
-        if (d === 90) return 'left';
-        if (d === 180) return 'backward';
-        if (d === 270) return 'right';
-        return 'forward';
-    }
-
-    _dirLabelFromKey(key) {
-        const resolvedKey = COPTER_DIR_MSG[key] ? key : 'forward';
-        const msgDef = COPTER_DIR_MSG[resolvedKey];
-        const viaFormat = formatMessage(msgDef);
-        if (viaFormat !== msgDef.default) {
-            return viaFormat;
-        }
-        const locale = (this.runtime && this.runtime.getLocale) ? this.runtime.getLocale() : 'en';
-        const table = COPTER_DIR_LABELS_BY_LOCALE[locale] || COPTER_DIR_LABELS_BY_LOCALE.en;
-        return table[key] || table.forward;
-    }
-
-    copter_direction() {
-        const key = this.flightDirKey && COPTER_DIR_MSG[this.flightDirKey]
-            ? this.flightDirKey
-            : this._dirKeyFromDegrees(this.dir);
-        return this._dirLabelFromKey(key);
     }
 
     /** Link quality 0..100 %; the simulator link is perfect. */
@@ -1816,31 +1558,6 @@ class CopterController {
     copter_speed() {
         const s = Number(this.speed);
         return Number.isFinite(s) ? s : 0;
-    }
-
-    copter_reset_local_position() {
-        if (this.runtime.sim_copter_ac) {
-            if (this.sim_is_flying || this.sim_z > 0.02) {
-                return;
-            }
-            // The current place becomes the start point; the sprite does not move.
-            this.sim_origin_x += this.sim_x;
-            this.sim_origin_y += this.sim_y;
-            this.sim_x = 0;
-            this.sim_y = 0;
-            this._simApplyState();
-            return;
-        }
-
-        if (!this.QCA ||
-            typeof this.QCA.canResetLocalPosition !== 'function' ||
-            typeof this.QCA.resetLocalPosition !== 'function') {
-            return;
-        }
-
-        if (this.QCA.canResetLocalPosition()) {
-            this.QCA.resetLocalPosition();
-        }
     }
 
     init_start_coordinates() {
