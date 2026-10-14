@@ -10,60 +10,66 @@ const COPTER_COMMAND_OPCODES = [
     'copter_fly_up',
     'copter_land',
     'copter_stop',
-    'copter_fly_distance',
-    'copter_fly_time',
-    'copter_fly_for_time_with_speed',
-    'copter_change_x_by',
-    'copter_change_y_by',
-    'copter_change_z_by',
+    'copter_fly',
     'copter_move_axis_to',
-    'copter_fly_for_seconds_to_coords',
     'copter_fly_to_coords',
     'copter_rotate',
-    'copter_set_direction',
     'copter_set_speed',
-    'copter_reset_local_position',
     'copter_charge_battery'
 ];
 
 /** Flight blocks refused by an empty simulator battery (land / stop / settings still work). */
 const SIM_FLIGHT_OPCODES = new Set([
     'copter_fly_up',
-    'copter_fly_distance',
-    'copter_fly_time',
-    'copter_fly_for_time_with_speed',
-    'copter_change_x_by',
-    'copter_change_y_by',
-    'copter_change_z_by',
+    'copter_fly',
     'copter_move_axis_to',
-    'copter_fly_for_seconds_to_coords',
     'copter_fly_to_coords',
     'copter_rotate'
 ]);
 
 /** Reporters and their value when no copter can be chosen. */
 const COPTER_REPORTER_DEFAULTS = {
-    copter_status: false,
-    copter_x_coord: 0,
-    copter_y_coord: 0,
-    copter_z_coord: 0,
-    copter_yaw: 0,
-    copter_direction: 0,
-    copter_battery: 0,
-    copter_is_flying: false,
-    copter_speed: 0
+    copter_is_flying: false
 };
 
-/** `[X ▾] of copter [N]` properties → controller reporter. */
+/** `[X ▾] of copter` / `[X ▾] of copter [N]` properties → controller reporter. */
 const COPTER_PROPERTY_REPORTERS = {
     x: 'copter_x_coord',
     y: 'copter_y_coord',
     z: 'copter_z_coord',
     yaw: 'copter_yaw',
     battery: 'copter_battery',
+    speed: 'copter_speed',
     flying: 'copter_is_flying',
     link: 'copter_link_quality'
 };
+
+/**
+ * Blocks no longer supported: in an old project they show what replaced them and do nothing.
+ * Blocks with a direct replacement are converted on load (`util/copter-legacy-blocks.js`); these
+ * primitives cover blocks that come in another way (the backpack).
+ */
+const LEGACY_COPTER_COMMANDS = [
+    'copter_fly_distance',
+    'copter_fly_time',
+    'copter_fly_for_time_with_speed',
+    'copter_change_x_by',
+    'copter_change_y_by',
+    'copter_change_z_by',
+    'copter_fly_for_seconds_to_coords',
+    'copter_set_direction',
+    'copter_reset_local_position'
+];
+const LEGACY_COPTER_REPORTERS = [
+    'copter_status',
+    'copter_direction',
+    'copter_x_coord',
+    'copter_y_coord',
+    'copter_z_coord',
+    'copter_yaw',
+    'copter_battery',
+    'copter_speed'
+];
 
 /** Menu value for every enabled copter. */
 const ALL_COPTERS = 'all';
@@ -92,8 +98,15 @@ class Scratch3QuadcopterBlocks {
     getPrimitives () {
         const primitives = {
             copter_with_copters: this.copter_with_copters,
+            copter_value: this.copter_value,
             copter_value_of: this.copter_value_of
         };
+        LEGACY_COPTER_COMMANDS.forEach(opcode => {
+            primitives[opcode] = () => {};
+        });
+        LEGACY_COPTER_REPORTERS.forEach(opcode => {
+            primitives[opcode] = () => 0;
+        });
         COPTER_COMMAND_OPCODES.forEach(opcode => {
             primitives[opcode] = (args, util) => this._runCommand(opcode, args, util);
         });
@@ -148,6 +161,26 @@ class Scratch3QuadcopterBlocks {
         return qca.getCopters()
             .filter(c => c.connected && c.enabled)
             .map(c => c.id);
+    }
+
+    /**
+     * Copter numbers for the palette: the copter menu lists them, swarm blocks show from two of
+     * them. Simulator: copter sprites. Hardware: numbered copters connected or reconnecting after
+     * a loss (a short dropout does not rebuild the palette).
+     * @param {Array<object>} [copters] `QCA.getCopters()` result when the caller already has it
+     * @returns {Array<number>} sorted numbers
+     */
+    getKnownCopterNumbers (copters) {
+        if (this.runtime.sim_copter_ac) {
+            return listSimCopterNumbers(this.runtime.targets);
+        }
+        const qca = this.runtime.QCA;
+        const list = copters || (qca && typeof qca.getCopters === 'function' ? qca.getCopters() : []);
+        return list
+            .filter(c => typeof c.id === 'number' &&
+                (c.connected || c.reconnecting || c.rebooting || c.state === 'lost'))
+            .map(c => c.id)
+            .sort((a, b) => a - b);
     }
 
     /** @returns {number|string} copter driven when nothing is active yet (primary / sim copter 1) */
@@ -257,6 +290,19 @@ class Scratch3QuadcopterBlocks {
         util.thread.copterSelection.push(selection);
         frame.copterSelectionPushed = true;
         util.startBranch(1, true);
+    }
+
+    /**
+     * `[property ▾] of copter` reads the selected copter (the first one of a set).
+     * @param {object} args block arguments (PROPERTY)
+     * @param {object} util block utility
+     * @returns {number|boolean} property value
+     */
+    copter_value (args, util) {
+        const opcode = COPTER_PROPERTY_REPORTERS[String(args.PROPERTY)];
+        const ids = this._targetIds(util);
+        if (!opcode || ids.length === 0) return 0;
+        return this.getController(ids[0])[opcode]({}, util);
     }
 
     /**

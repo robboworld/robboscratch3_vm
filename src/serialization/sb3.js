@@ -16,6 +16,7 @@ const uid = require('../util/uid');
 const MathUtil = require('../util/math-util');
 const StringUtil = require('../util/string-util');
 const VariableUtil = require('../util/variable-util');
+const {migrateLegacyCopterBlock} = require('../util/copter-legacy-blocks');
 
 const JSZip = require('jszip');
 const md5 = require('js-md5');
@@ -886,6 +887,7 @@ const deserializeBlocks = function (blocks) {
         block.id = blockId; // add id back to block since it wasn't serialized
         block.inputs = deserializeInputs(block.inputs, blockId, blocks);
         block.fields = deserializeFields(block.fields);
+        migrateLegacyCopterBlock(block);
     }
     return blocks;
 };

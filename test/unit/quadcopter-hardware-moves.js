@@ -84,7 +84,7 @@ const near = (t, actual, expected, message) => t.ok(Math.abs(actual - expected) 
 test('fly forward N seconds after a 90° turn: one go_to along the nose, in the world frame', t => {
     const {runtime, qca, copter} = makeCopter(t, {yawDeg: 90});
     const speed = copter._hardwareSpeedMps();
-    copter.copter_fly_time({DIRECTION: 'forward', SECONDS: 2}, makeUtil(runtime, 'a'));
+    copter.copter_fly({DIRECTION: 'forward', AMOUNT: 2, UNIT: 'seconds'}, makeUtil(runtime, 'a'));
     t.equal(qca.calls.goTo.length, 1, 'one HL command');
     const move = qca.calls.goTo[0];
     near(t, move.dx, 0, 'world dx');
@@ -97,7 +97,7 @@ test('fly forward N seconds after a 90° turn: one go_to along the nose, in the 
 
 test('fly N meters after a turn goes where the nose points', t => {
     const {runtime, qca, copter} = makeCopter(t, {yawDeg: 90});
-    copter.copter_fly_distance({DIRECTION: 'forward', METERS: 1}, makeUtil(runtime, 'a'));
+    copter.copter_fly({DIRECTION: 'forward', AMOUNT: 1, UNIT: 'meters'}, makeUtil(runtime, 'a'));
     near(t, qca.calls.goTo[0].dx, 0, 'world dx');
     near(t, qca.calls.goTo[0].dy, 1, 'world dy');
     t.end();
@@ -112,9 +112,9 @@ test('turn left 90°: yaw offset +π/2 only', t => {
     t.end();
 });
 
-test('change x by 0.2: 0.2 m along world X, no 3 s minimum', t => {
+test('fly along X to 0.2: 0.2 m along world X whatever the heading, no 3 s minimum', t => {
     const {runtime, qca, copter} = makeCopter(t, {yawDeg: 45});
-    copter.copter_change_x_by({DISTANCE_DELTA: 0.2}, makeUtil(runtime, 'a'));
+    copter.copter_move_axis_to({AXIS: 'X', COORD: 0.2}, makeUtil(runtime, 'a'));
     const move = qca.calls.goTo[0];
     near(t, move.dx, 0.2, 'dx');
     near(t, move.dy, 0, 'dy');
@@ -122,21 +122,21 @@ test('change x by 0.2: 0.2 m along world X, no 3 s minimum', t => {
     t.end();
 });
 
-test('change z by −0.4 from 0.5 m: down to 0.1 m, no landing', t => {
+test('fly down 0.4 m from 0.5 m: down to 0.1 m, no landing', t => {
     const {runtime, qca, copter} = makeCopter(t, {z: 0.5});
     const util = makeUtil(runtime, 'a');
-    copter.copter_change_z_by({DISTANCE_DELTA: -0.4}, util);
+    copter.copter_fly({DIRECTION: 'down', AMOUNT: 0.4, UNIT: 'meters'}, util);
     near(t, qca.calls.goTo[0].dz, -0.4, 'dz');
     qca.pose.z = 0.45;
-    copter.copter_change_z_by({DISTANCE_DELTA: -0.4}, util);
+    copter.copter_fly({DIRECTION: 'down', AMOUNT: 0.4, UNIT: 'meters'}, util);
     t.equal(qca.calls.land, 0, 'not a landing on the way down');
     t.end();
 });
 
 test('move blocks do nothing on the ground', t => {
     const {runtime, qca, copter} = makeCopter(t, {z: 0});
-    copter.copter_fly_time({DIRECTION: 'forward', SECONDS: 1}, makeUtil(runtime, 'a'));
-    copter.copter_change_z_by({DISTANCE_DELTA: 0.5}, makeUtil(runtime, 'b'));
+    copter.copter_fly({DIRECTION: 'forward', AMOUNT: 1, UNIT: 'seconds'}, makeUtil(runtime, 'a'));
+    copter.copter_fly({DIRECTION: 'up', AMOUNT: 0.5, UNIT: 'meters'}, makeUtil(runtime, 'b'));
     t.equal(qca.calls.goTo.length, 0);
     t.notOk(copter.commandCoordinator.activeCommand);
     t.end();
@@ -145,9 +145,9 @@ test('move blocks do nothing on the ground', t => {
 test('a moving copter holds nothing after the block: the planner keeps the point', t => {
     const {runtime, qca, copter} = makeCopter(t);
     const util = makeUtil(runtime, 'a');
-    copter.copter_change_x_by({DISTANCE_DELTA: 0.3}, util);
+    copter.copter_move_axis_to({AXIS: 'X', COORD: 0.3}, util);
     qca.pose.x = 0.3;
-    copter.copter_change_x_by({DISTANCE_DELTA: 0.3}, util);
+    copter.copter_move_axis_to({AXIS: 'X', COORD: 0.3}, util);
     t.notOk(copter.commandCoordinator.activeCommand, 'finished at the point');
     t.equal(qca.calls.hold, 0, 'no hold / stream after a normal finish');
     t.end();
@@ -155,7 +155,7 @@ test('a moving copter holds nothing after the block: the planner keeps the point
 
 test('land from another script interrupts a running move', t => {
     const {runtime, qca, copter} = makeCopter(t);
-    copter.copter_fly_time({DIRECTION: 'forward', SECONDS: 5}, makeUtil(runtime, 'loop'));
+    copter.copter_fly({DIRECTION: 'forward', AMOUNT: 5, UNIT: 'seconds'}, makeUtil(runtime, 'loop'));
     copter.copter_land({}, makeUtil(runtime, 'spaceKey'));
     t.equal(qca.calls.land, 1, 'land sent at once');
     t.equal(copter.commandCoordinator.activeCommand.key, 'copter_land');
@@ -166,9 +166,9 @@ test('land from another script interrupts a running move', t => {
 test('a move of a script that is gone is cancelled by the next one', t => {
     const {runtime, qca, copter} = makeCopter(t);
     const old = makeUtil(runtime, 'a');
-    copter.copter_fly_time({DIRECTION: 'forward', SECONDS: 5}, old);
+    copter.copter_fly({DIRECTION: 'forward', AMOUNT: 5, UNIT: 'seconds'}, old);
     runtime.threads.splice(runtime.threads.indexOf(old.thread), 1);
-    copter.copter_fly_time({DIRECTION: 'backward', SECONDS: 1}, makeUtil(runtime, 'b'));
+    copter.copter_fly({DIRECTION: 'backward', AMOUNT: 1, UNIT: 'seconds'}, makeUtil(runtime, 'b'));
     t.equal(qca.calls.hold, 1, 'the orphan move is stopped');
     t.equal(qca.calls.goTo.length, 2, 'the new move starts');
     t.equal(copter.commandCoordinator.activeCommand.ownerId, 'b');
@@ -178,9 +178,9 @@ test('a move of a script that is gone is cancelled by the next one', t => {
 test('critical battery during a move drops the block without flying on', t => {
     const {runtime, qca, copter} = makeCopter(t);
     const util = makeUtil(runtime, 'a');
-    copter.copter_fly_time({DIRECTION: 'forward', SECONDS: 5}, util);
+    copter.copter_fly({DIRECTION: 'forward', AMOUNT: 5, UNIT: 'seconds'}, util);
     qca.getBatteryState = () => ({level: 'critical', canTakeOff: false});
-    copter.copter_fly_time({DIRECTION: 'forward', SECONDS: 5}, util);
+    copter.copter_fly({DIRECTION: 'forward', AMOUNT: 5, UNIT: 'seconds'}, util);
     t.notOk(copter.commandCoordinator.activeCommand, 'block dropped');
     t.equal(qca.calls.hold, 0, 'the DCA lands it: no hold');
     t.equal(qca.calls.goTo.length, 1);

@@ -269,10 +269,68 @@ test('sim: each copter has its own start point, like a Flow deck', t => {
     blocks.sim_x = 0.5;
     blocks._simApplyState();
     t.ok(Math.abs(target.x + 110) < 1e-6, 'local 0.5 m from its own start');
+    t.end();
+});
+
+test('sim: takeoff makes the takeoff point (0, 0), as on a real copter', t => {
+    const {blocks, target} = makeBlocks();
+    blocks._ensureSimCopterSprite = () => true;
     blocks.sim_x = 0.3;
-    blocks.copter_reset_local_position();
-    t.equal(blocks.sim_x, 0, 'reset: current place is the new start');
-    t.ok(Math.abs(target.x + 130) < 1e-6, 'sprite does not jump');
+    blocks.sim_y = -0.2;
+    blocks._simApplyState();
+    blocks.copter_fly_up({}, Object.assign(makeUtil(), {yield () {}}));
+    blocks._simClearInterval();
+    blocks._simClearAllTimeouts();
+    t.equal(blocks.sim_x, 0, 'x from the takeoff point');
+    t.equal(blocks.sim_y, 0, 'y from the takeoff point');
+    t.ok(Math.abs(target.x - 30) < 1e-6 && Math.abs(target.y + 20) < 1e-6, 'sprite does not jump');
+    t.end();
+});
+
+test('blocks: [X] of copter reads the selected copter', t => {
+    const {pkg} = makeMultiCopterRuntime(['Robbo Quadcopter', 'Robbo Quadcopter 2']);
+    pkg.getController(1).sim_x = 0.4;
+    pkg.getController(2).sim_z = 0.7;
+    pkg.getController(2).speed = 0.8;
+    const util = makeUtil();
+    t.equal(pkg.copter_value({PROPERTY: 'x'}, util), 0.4, 'no selection: the first copter');
+    pkg.copter_with_copters({COPTERS: 2}, util);
+    t.equal(pkg.copter_value({PROPERTY: 'z'}, util), 0.7, 'inside copters [2] do');
+    t.equal(pkg.copter_value({PROPERTY: 'speed'}, util), 0.8, 'speed');
+    t.equal(pkg.copter_value({PROPERTY: 'link'}, util), 100, 'simulator link');
+    t.equal(pkg.copter_value({PROPERTY: 'nope'}, util), 0, 'unknown property');
+    t.end();
+});
+
+test('blocks: old copter blocks do nothing', t => {
+    const {pkg} = makeMultiCopterRuntime(['Robbo Quadcopter']);
+    const primitives = pkg.getPrimitives();
+    const copter = pkg.getController(1);
+    copter.sim_x = 0.2;
+    ['copter_change_x_by', 'copter_fly_for_time_with_speed', 'copter_fly_for_seconds_to_coords',
+        'copter_set_direction', 'copter_reset_local_position'].forEach(opcode => {
+        t.equal(primitives[opcode]({DISTANCE_DELTA: 1, SECONDS: 1, X_COORD: 1}, makeUtil()), undefined, opcode);
+    });
+    t.equal(copter.sim_x, 0.2, 'the copter stays');
+    t.notOk(copter.sim_interval, 'no motion started');
+    ['copter_x_coord', 'copter_battery', 'copter_direction', 'copter_status'].forEach(opcode => {
+        t.equal(primitives[opcode]({}, makeUtil()), 0, opcode);
+    });
+    t.end();
+});
+
+test('blocks: copter numbers for the palette', t => {
+    const {pkg, runtime} = makeMultiCopterRuntime(['Robbo Quadcopter 3', 'Robbo Quadcopter']);
+    t.same(pkg.getKnownCopterNumbers(), [1, 3], 'simulator: copter sprites');
+    runtime.sim_copter_ac = false;
+    const copters = [
+        {id: 2, connected: true},
+        {id: 5, connected: false, state: 'lost'},
+        {id: 7, connected: false, state: 'disconnected'},
+        {id: 'new', connected: true}
+    ];
+    t.same(pkg.getKnownCopterNumbers(copters), [2, 5],
+        'hardware: connected or lost for a moment; not a copter only seen by the scan, not the factory one');
     t.end();
 });
 
