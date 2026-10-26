@@ -524,7 +524,6 @@ class VirtualMachine extends EventEmitter {
             y: round(b.sim_y, 4),
             z: round(b.sim_z, 4),
             yaw: round(b._castYawTo360(b.sim_yaw), 2),
-            battery: round(b.sim_battery, 1),
             originX: round(b.sim_origin_x, 4),
             originY: round(b.sim_origin_y, 4)
         };
@@ -566,7 +565,6 @@ class VirtualMachine extends EventEmitter {
         if (Number.isFinite(state.y)) b.sim_y = state.y;
         if (Number.isFinite(state.z)) b.sim_z = Math.max(0, state.z);
         if (Number.isFinite(state.yaw)) b.sim_yaw = b._castYawTo360(state.yaw);
-        if (Number.isFinite(state.battery)) b.simChargeTo(state.battery);
         if (Number.isFinite(state.originX)) b.sim_origin_x = state.originX;
         if (Number.isFinite(state.originY)) b.sim_origin_y = state.originY;
         b.fack = 0;
@@ -930,7 +928,11 @@ class VirtualMachine extends EventEmitter {
                 }
                 return this.installTargets(targets, extensions, true);
             })
-            .then(() => this._applyPendingRobboSimulatorMeta())
+            .then(() => {
+                // The charge is not saved: a new, opened or restored project starts charged.
+                if (this.runtime._copterBlocks) this.runtime._copterBlocks.resetSimBatteries();
+                return this._applyPendingRobboSimulatorMeta();
+            })
             .catch(err => {
                 this._pendingRobboSimulatorMeta = null;
                 throw err;

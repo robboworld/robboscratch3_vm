@@ -24,6 +24,24 @@ const COPTER_TURN_SIDE_LABELS_BY_LOCALE = {
 };
 
 
+/** Speech bubble of a simulator copter whose flight block was refused for an empty battery. */
+const SIM_BATTERY_EMPTY_MSG = {id: 'COPTER_SIM_BATTERY_EMPTY', default: 'Battery is empty'};
+
+const SIM_BATTERY_EMPTY_BY_LOCALE = {
+    ru: 'Батарея разряжена',
+    en: 'Battery is empty'
+};
+
+const SIM_BATTERY_EMPTY_BUBBLE_MS = 2000;
+
+/** @returns {string} bubble text in the editor language (scratch-l10n, then the built-in table) */
+const localizedSimBatteryEmpty = function () {
+    const text = formatMessage(SIM_BATTERY_EMPTY_MSG);
+    if (text && text !== SIM_BATTERY_EMPTY_MSG.id && text !== SIM_BATTERY_EMPTY_MSG.default) return text;
+    const locale = String(formatMessage.setup().locale || 'en').split(/[-_]/)[0];
+    return SIM_BATTERY_EMPTY_BY_LOCALE[locale] || SIM_BATTERY_EMPTY_MSG.default;
+};
+
 const {copterNumberOfTarget, listSimCopterNumbers} = require('../util/copter-sim-sprite');
 const COSTUME_IDLE = 0;
 const COSTUME_FLYING = 1;
@@ -57,6 +75,8 @@ const GROUND_TARGET_Z_M = 0.05;
 const HARDWARE_PRE_LAND_HEIGHT_M = 0.15;
 const SIM_POS_TOLERANCE = 0.004;
 const SIM_YAW_TOLERANCE = 2.5;
+/** The stage edge stopped the copter when it held it back by more than this (m). */
+const SIM_EDGE_EPSILON_M = 1e-6;
 
 /**
  * Полёт по железу: каждый блок — одна HL-команда (takeoff / go_to relative / land). Траекторию
@@ -137,7 +157,10 @@ class CopterController {
         this.sim_is_flying = false;
         this.sim_battery = 100;
         this._simBatteryTimer = null;
+        this._simEmptyBubbleTimeout = null;
         this.sim_interval = null;
+        /** The stage edge held the copter back during the current move. */
+        this._simAtEdge = false;
         this._sim_rotate_remaining = 0;
         /** Sprite size (%) on the ground; captured from the user's sprite, never forced. */
         this.sim_base_size = null;
@@ -251,6 +274,28 @@ class CopterController {
     }
 
     /**
+     * A flight block was refused because the simulator battery is empty: the copter says so on
+     * stage, otherwise the student only sees that the blocks «do not work».
+     */
+    simSayBatteryEmpty() {
+        const target = this._getSimCopterTarget();
+        if (!target) return;
+        const text = localizedSimBatteryEmpty();
+        // A refused block in a loop comes back every frame: show the bubble once, keep it up.
+        if (this._simEmptyBubbleTimeout) {
+            clearTimeout(this._simEmptyBubbleTimeout);
+        } else {
+            this.runtime.emit('SAY', target, 'say', text);
+        }
+        this._simEmptyBubbleTimeout = setTimeout(() => {
+            this._simEmptyBubbleTimeout = null;
+            const bubble = target.getCustomState && target.getCustomState('Scratch.looks');
+            // The student's own «say» stays.
+            if (bubble && bubble.text === text) this.runtime.emit('SAY', target, 'say', '');
+        }, SIM_BATTERY_EMPTY_BUBBLE_MS);
+    }
+
+    /**
      * Altitude scales the sprite relative to its ground size. A size set by the user (block or
      * sprite info) is detected as a mismatch with what we applied last and becomes the new base.
      */
@@ -280,8 +325,13 @@ class CopterController {
         const stageH = RuntimeClass.STAGE_HEIGHT || 360;
         const maxX = Math.max(0, (stageW / 2) - halfW) / SIM_SCALE;
         const maxY = Math.max(0, (stageH / 2) - halfH) / SIM_SCALE;
-        const worldX = MathUtil.clamp(this.sim_origin_x + this.sim_x, -maxX, maxX);
-        const worldY = MathUtil.clamp(this.sim_origin_y + this.sim_y, -maxY, maxY);
+        const wantedX = this.sim_origin_x + this.sim_x;
+        const wantedY = this.sim_origin_y + this.sim_y;
+        const worldX = MathUtil.clamp(wantedX, -maxX, maxX);
+        const worldY = MathUtil.clamp(wantedY, -maxY, maxY);
+        if (Math.abs(wantedX - worldX) > SIM_EDGE_EPSILON_M || Math.abs(wantedY - worldY) > SIM_EDGE_EPSILON_M) {
+            this._simAtEdge = true;
+        }
         this.sim_x = worldX - this.sim_origin_x;
         this.sim_y = worldY - this.sim_origin_y;
         target.setXY(worldX * SIM_SCALE, worldY * SIM_SCALE);
@@ -531,6 +581,7 @@ class CopterController {
      */
     _simStartMoveToCoord(tx, ty, tz, tyaw, opts) {
         this._simClearInterval();
+        this._simAtEdge = false;
         const xyMps = opts && Number.isFinite(opts.xyMps) ? opts.xyMps : this._speedMps();
         const zMps = opts && Number.isFinite(opts.zMps) ? opts.zMps : this._speedMps();
         const yawDps = this._yawRateDps();
@@ -603,6 +654,16 @@ class CopterController {
         }, SIM_STEP_MS);
     }
 
+    /**
+     * Stage heading (math angle, rad) of a body direction. Body directions count CCW from the nose
+     * (left = 90), the sprite direction clockwise (Scratch: 90 = right).
+     * @param {number} dirDeg body direction
+     * @returns {number} angle from the stage X axis, CCW
+     */
+    _simHeadingRad(dirDeg) {
+        return (90 - (this.sim_yaw - dirDeg)) * Math.PI / 180;
+    }
+
     _simIsRotateByComplete() {
         return this._sim_rotate_remaining <= SIM_YAW_TOLERANCE && !this.sim_interval;
     }
@@ -614,6 +675,15 @@ class CopterController {
             Math.abs(this.sim_y - ty) < SIM_POS_TOLERANCE &&
             Math.abs(this.sim_z - tz) < SIM_POS_TOLERANCE &&
             dyaw < SIM_YAW_TOLERANCE;
+    }
+
+    /**
+     * A move is over when the copter reached the point, or when the stage edge stopped it and
+     * the height is reached: the point behind the edge can never be reached.
+     */
+    _simMoveDone(tx, ty, tz) {
+        if (this._simIsAtTarget(tx, ty, tz, this.sim_yaw)) return true;
+        return this._simAtEdge === true && Math.abs(this.sim_z - tz) < SIM_POS_TOLERANCE;
     }
 
     _castYawTo360(yaw) {
@@ -1106,7 +1176,7 @@ class CopterController {
             }
             if (this.fack === 0) {
                 const meters = Number(args.METERS);
-                const rad = (90 - (this.sim_yaw + this.dir)) * Math.PI / 180;
+                const rad = this._simHeadingRad(this.dir);
                 const tx = this.sim_x + meters * Math.cos(rad);
                 const ty = this.sim_y + meters * Math.sin(rad);
                 this._sim_target_x = tx;
@@ -1118,7 +1188,7 @@ class CopterController {
                 return;
             } else if (this.fack !== 2) {
                 if ((Date.now() - this.yielded_time_start) >= this.yielded_max_time) this.fack = 2;
-                if (this._simIsAtTarget(this._sim_target_x, this._sim_target_y, this.sim_z, this.sim_yaw)) this.fack = 2;
+                if (this._simMoveDone(this._sim_target_x, this._sim_target_y, this.sim_z)) this.fack = 2;
                 util.yield();
                 return;
             }
@@ -1163,7 +1233,7 @@ class CopterController {
                 if (!this._simCanExecuteAirCommand()) return;
             }
             if (this.fack === 0) {
-                const headingRad = (90 - (this.sim_yaw + this.dir)) * Math.PI / 180;
+                const headingRad = this._simHeadingRad(this.dir);
                 const vx = this._speedMps() * Math.cos(headingRad);
                 const vy = this._speedMps() * Math.sin(headingRad);
                 this._simClearInterval();
@@ -1247,7 +1317,7 @@ class CopterController {
             return;
         } else if (this.fack !== 2) {
             if ((Date.now() - this.yielded_time_start) >= this.yielded_max_time) this.fack = 2;
-            if (this._simIsAtTarget(this._sim_target_x, this._sim_target_y, this._sim_target_z, this.sim_yaw)) this.fack = 2;
+            if (this._simMoveDone(this._sim_target_x, this._sim_target_y, this._sim_target_z)) this.fack = 2;
             util.yield();
             return;
         }
