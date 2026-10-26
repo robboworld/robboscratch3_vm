@@ -1,5 +1,6 @@
 const StringUtil = require('../util/string-util');
 const log = require('../util/log');
+const {fixBundledCostumeCenter} = require('../robbo/robbo-simulator-costumes');
 const {loadSvgString, serializeSvgToString} = require('scratch-svg-renderer');
 
 const loadVector_ = function (costume, runtime, rotationCenter, optVersion) {
@@ -360,6 +361,7 @@ const loadCostume = function (md5ext, costume, runtime, optVersion) {
     const md5 = idParts[0];
     const ext = idParts[1].toLowerCase();
     costume.dataFormat = ext;
+    fixBundledCostumeCenter(md5, costume);
 
     if (costume.asset) {
         // Costume comes with asset. It could be coming from image upload, drag and drop, or file

@@ -143,6 +143,13 @@ class Scratch3QuadcopterBlocks {
     }
 
     /** @returns {Array<CopterController>} controllers of the simulator copter sprites on stage */
+    /**
+     * Every project starts with charged simulator copters: the charge is not part of the project.
+     */
+    resetSimBatteries () {
+        this._controllers.forEach(controller => controller.simChargeTo(100));
+    }
+
     getSimControllers () {
         return listSimCopterNumbers(this.runtime.targets).map(n => this.getController(n));
     }
@@ -243,6 +250,7 @@ class Scratch3QuadcopterBlocks {
 
     _runOnController (controller, opcode, args, util) {
         if (this.runtime.sim_copter_ac && controller.sim_battery <= 0 && SIM_FLIGHT_OPCODES.has(opcode)) {
+            controller.simSayBatteryEmpty();
             return;
         }
         return controller[opcode](args, util);

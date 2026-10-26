@@ -260,6 +260,68 @@ test('sim battery: drains in flight, lands at 0 %, charge block refills', t => {
     t.end();
 });
 
+test('sim: fly left/right goes to the left/right of the nose', t => {
+    const {blocks} = makeBlocks();
+    const flyFrom = (yaw, direction) => {
+        blocks._ensureSimCopterSprite = () => true;
+        blocks._syncFromSpritePositionIfNeeded = () => false;
+        blocks._simClearInterval();
+        blocks.fack = 0;
+        blocks.sim_x = 0;
+        blocks.sim_y = 0;
+        blocks.sim_z = 0.3;
+        blocks.sim_is_flying = true;
+        blocks.sim_yaw = yaw;
+        blocks.copter_fly({DIRECTION: direction, AMOUNT: 1, UNIT: 'meters'}, Object.assign(makeUtil(), {yield () {}}));
+        blocks._simClearInterval();
+        return {x: Math.round(blocks._sim_target_x * 1000) / 1000, y: Math.round(blocks._sim_target_y * 1000) / 1000};
+    };
+    t.same(flyFrom(90, 'forward'), {x: 1, y: 0}, 'nose to the right: forward is +X');
+    t.same(flyFrom(90, 'left'), {x: 0, y: 1}, 'nose to the right: left is up the stage');
+    t.same(flyFrom(90, 'right'), {x: 0, y: -1}, 'nose to the right: right is down the stage');
+    t.same(flyFrom(180, 'left'), {x: 1, y: 0}, 'nose down: left is +X');
+    t.same(flyFrom(90, 'backward'), {x: -1, y: 0}, 'backward');
+    t.end();
+});
+
+test('sim: a move stopped by the stage edge finishes', t => {
+    const {blocks} = makeBlocks();
+    blocks.sim_z = 0.3;
+    blocks.sim_is_flying = true;
+    blocks._simStartMoveToCoord(3, 0, 0.3, 90);
+    blocks._simClearInterval();
+    t.notOk(blocks._simMoveDone(3, 0, 0.3), 'not done before the copter moved');
+    blocks.sim_x = 3;
+    blocks._simApplyState();
+    t.ok(blocks.sim_x < 2.4, 'held at the edge');
+    t.ok(blocks._simMoveDone(3, 0, 0.3), 'the point behind the edge is not waited for');
+    t.notOk(blocks._simMoveDone(3, 0, 1), 'still climbing: not done yet');
+    blocks._simStartMoveToCoord(0, 0, 0.3, 90);
+    blocks._simClearInterval();
+    t.notOk(blocks._simMoveDone(0, 0, 0.3), 'next move from the edge starts clean');
+    t.end();
+});
+
+test('sim battery: empty battery refuses takeoff with a bubble; a loaded project is charged', t => {
+    const {pkg, runtime, targets} = makeMultiCopterRuntime(['Robbo Quadcopter']);
+    const said = [];
+    runtime.emit = (event, target, type, text) => {
+        if (event === 'SAY') said.push({target, text});
+    };
+    const copter = pkg.getController(1);
+    copter.simChargeTo(0);
+    pkg._runOnController(copter, 'copter_fly_up', {}, makeUtil());
+    t.equal(copter.sim_is_flying, false, 'no takeoff');
+    t.equal(said.length, 1, 'the copter says why');
+    t.equal(said[0].target, targets[0], 'on its own sprite');
+    pkg._runOnController(copter, 'copter_fly_up', {}, makeUtil());
+    t.equal(said.length, 1, 'a loop does not repeat the bubble every frame');
+    clearTimeout(copter._simEmptyBubbleTimeout);
+    pkg.resetSimBatteries();
+    t.equal(copter.sim_battery, 100, 'charged again');
+    t.end();
+});
+
 test('sim: each copter has its own start point, like a Flow deck', t => {
     const {blocks, target} = makeBlocks();
     target.x = -160;
