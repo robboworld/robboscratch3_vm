@@ -260,8 +260,22 @@ test('sim battery: drains in flight, lands at 0 %, charge block refills', t => {
     t.end();
 });
 
+/**
+ * A copter left in the air keeps its battery timer running: land it so the test process exits.
+ * @param {object} t tap test
+ * @param {CopterController} blocks copter
+ */
+const landAtTeardown = function (t, blocks) {
+    t.teardown(() => {
+        blocks._simClearInterval();
+        blocks.sim_is_flying = false;
+        blocks._simSyncBatteryTimer();
+    });
+};
+
 test('sim: fly left/right goes to the left/right of the nose', t => {
     const {blocks} = makeBlocks();
+    landAtTeardown(t, blocks);
     const flyFrom = (yaw, direction) => {
         blocks._ensureSimCopterSprite = () => true;
         blocks._syncFromSpritePositionIfNeeded = () => false;
@@ -286,6 +300,7 @@ test('sim: fly left/right goes to the left/right of the nose', t => {
 
 test('sim: a move stopped by the stage edge finishes', t => {
     const {blocks} = makeBlocks();
+    landAtTeardown(t, blocks);
     blocks.sim_z = 0.3;
     blocks.sim_is_flying = true;
     blocks._simStartMoveToCoord(3, 0, 0.3, 90);
@@ -294,7 +309,13 @@ test('sim: a move stopped by the stage edge finishes', t => {
     blocks.sim_x = 3;
     blocks._simApplyState();
     t.ok(blocks.sim_x < 2.4, 'held at the edge');
+    const said = [];
+    blocks.runtime.emit = (event, target, type, text) => {
+        if (event === 'SAY') said.push(text);
+    };
     t.ok(blocks._simMoveDone(3, 0, 0.3), 'the point behind the edge is not waited for');
+    t.same(said, ['The stage ends here'], 'the copter says why it stopped short');
+    clearTimeout(blocks._simBubbleTimeout);
     t.notOk(blocks._simMoveDone(3, 0, 1), 'still climbing: not done yet');
     blocks._simStartMoveToCoord(0, 0, 0.3, 90);
     blocks._simClearInterval();
@@ -316,7 +337,7 @@ test('sim battery: empty battery refuses takeoff with a bubble; a loaded project
     t.equal(said[0].target, targets[0], 'on its own sprite');
     pkg._runOnController(copter, 'copter_fly_up', {}, makeUtil());
     t.equal(said.length, 1, 'a loop does not repeat the bubble every frame');
-    clearTimeout(copter._simEmptyBubbleTimeout);
+    clearTimeout(copter._simBubbleTimeout);
     pkg.resetSimBatteries();
     t.equal(copter.sim_battery, 100, 'charged again');
     t.end();
