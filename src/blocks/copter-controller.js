@@ -24,22 +24,34 @@ const COPTER_TURN_SIDE_LABELS_BY_LOCALE = {
 };
 
 
-/** Speech bubble of a simulator copter whose flight block was refused for an empty battery. */
-const SIM_BATTERY_EMPTY_MSG = {id: 'COPTER_SIM_BATTERY_EMPTY', default: 'Battery is empty'};
-
-const SIM_BATTERY_EMPTY_BY_LOCALE = {
-    ru: 'Батарея разряжена',
-    en: 'Battery is empty'
+/**
+ * Speech bubbles of a simulator copter: why a block did nothing or stopped short. Texts come from
+ * robboscratch3_I10n (editor/interface, passed to the VM by the GUI); the table is the fallback.
+ */
+const SIM_BUBBLES = {
+    batteryEmpty: {
+        msg: {id: 'gui.RobboGui.CopterSim.batteryEmpty', default: 'Battery is empty'},
+        ru: 'Батарея разряжена'
+    },
+    stageEdge: {
+        msg: {id: 'gui.RobboGui.CopterSim.stageEdge', default: 'The stage ends here'},
+        ru: 'Дальше край сцены'
+    }
 };
 
-const SIM_BATTERY_EMPTY_BUBBLE_MS = 2000;
+const SIM_BUBBLE_MS = 2000;
 
-/** @returns {string} bubble text in the editor language (scratch-l10n, then the built-in table) */
-const localizedSimBatteryEmpty = function () {
-    const text = formatMessage(SIM_BATTERY_EMPTY_MSG);
-    if (text && text !== SIM_BATTERY_EMPTY_MSG.id && text !== SIM_BATTERY_EMPTY_MSG.default) return text;
-    const locale = String(formatMessage.setup().locale || 'en').split(/[-_]/)[0];
-    return SIM_BATTERY_EMPTY_BY_LOCALE[locale] || SIM_BATTERY_EMPTY_MSG.default;
+/**
+ * @param {string} key SIM_BUBBLES key
+ * @returns {string} bubble text in the editor language
+ */
+const localizedSimBubble = function (key) {
+    const bubble = SIM_BUBBLES[key];
+    const setup = formatMessage.setup();
+    const loaded = (setup.translations || {})[setup.locale] || {};
+    if (loaded[bubble.msg.id]) return formatMessage(bubble.msg);
+    const language = String(setup.locale || 'en').split(/[-_]/)[0];
+    return bubble[language] || bubble.msg.default;
 };
 
 const {copterNumberOfTarget, listSimCopterNumbers} = require('../util/copter-sim-sprite');
@@ -157,7 +169,8 @@ class CopterController {
         this.sim_is_flying = false;
         this.sim_battery = 100;
         this._simBatteryTimer = null;
-        this._simEmptyBubbleTimeout = null;
+        this._simBubbleTimeout = null;
+        this._simBubbleText = '';
         this.sim_interval = null;
         /** The stage edge held the copter back during the current move. */
         this._simAtEdge = false;
@@ -278,21 +291,31 @@ class CopterController {
      * stage, otherwise the student only sees that the blocks «do not work».
      */
     simSayBatteryEmpty() {
+        this._simSay('batteryEmpty');
+    }
+
+    /**
+     * Speech bubble on the copter sprite for a couple of seconds.
+     * @param {string} key SIM_BUBBLES key
+     */
+    _simSay(key) {
         const target = this._getSimCopterTarget();
         if (!target) return;
-        const text = localizedSimBatteryEmpty();
+        const text = localizedSimBubble(key);
         // A refused block in a loop comes back every frame: show the bubble once, keep it up.
-        if (this._simEmptyBubbleTimeout) {
-            clearTimeout(this._simEmptyBubbleTimeout);
+        if (this._simBubbleTimeout && this._simBubbleText === text) {
+            clearTimeout(this._simBubbleTimeout);
         } else {
+            if (this._simBubbleTimeout) clearTimeout(this._simBubbleTimeout);
             this.runtime.emit('SAY', target, 'say', text);
         }
-        this._simEmptyBubbleTimeout = setTimeout(() => {
-            this._simEmptyBubbleTimeout = null;
+        this._simBubbleText = text;
+        this._simBubbleTimeout = setTimeout(() => {
+            this._simBubbleTimeout = null;
             const bubble = target.getCustomState && target.getCustomState('Scratch.looks');
             // The student's own «say» stays.
             if (bubble && bubble.text === text) this.runtime.emit('SAY', target, 'say', '');
-        }, SIM_BATTERY_EMPTY_BUBBLE_MS);
+        }, SIM_BUBBLE_MS);
     }
 
     /**
@@ -683,7 +706,10 @@ class CopterController {
      */
     _simMoveDone(tx, ty, tz) {
         if (this._simIsAtTarget(tx, ty, tz, this.sim_yaw)) return true;
-        return this._simAtEdge === true && Math.abs(this.sim_z - tz) < SIM_POS_TOLERANCE;
+        if (this._simAtEdge !== true || Math.abs(this.sim_z - tz) >= SIM_POS_TOLERANCE) return false;
+        // The copter flew less than asked: say why.
+        this._simSay('stageEdge');
+        return true;
     }
 
     _castYawTo360(yaw) {
