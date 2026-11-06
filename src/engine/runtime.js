@@ -1573,7 +1573,10 @@ class Runtime extends EventEmitter {
      * @property {string} xml - the XML text for this category, starting with `<category>` and ending with `</category>`
      */
     getBlocksXML (target) {
-        return this._blockInfo.map(categoryInfo => {
+        // An extension kept only for saved projects hides all its blocks and gets no category.
+        const paletteCategories = this._blockInfo.filter(categoryInfo =>
+            !categoryInfo.blocks.length || categoryInfo.blocks.some(block => !block.info.hideFromPalette));
+        return paletteCategories.map(categoryInfo => {
             const {name, color1, color2} = categoryInfo;
             // Filter out blocks that aren't supposed to be shown on this target, as determined by the block info's
             // `hideFromPalette` and `filter` properties.
