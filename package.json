@@ -43,9 +43,9 @@
   },
   "browserslist": [
     "Chrome >= 63",
-    "Edge >= 15",
+    "Edge >= 79",
     "Firefox >= 57",
-    "Safari >= 11"
+    "Safari >= 11.1"
   ],
   "tap": {
     "branches": 60,
